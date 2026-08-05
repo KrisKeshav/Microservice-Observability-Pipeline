@@ -1,0 +1,51 @@
+services:
+  service-c:
+    build:
+      context: .
+      dockerfile: services/service_c/Dockerfile
+    environment:
+      SERVICE_C_FAILURE_RATE: "0.25"
+      SERVICE_C_SLOW_RATE: "0.15"
+      SERVICE_C_SLOW_RESPONSE_SECONDS: "1.5"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  service-b:
+    build:
+      context: .
+      dockerfile: services/service_b/Dockerfile
+    environment:
+      SERVICE_C_URL: http://service-c:8000
+      SERVICE_C_TIMEOUT_SECONDS: "0.5"
+    depends_on:
+      service-c:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  service-a:
+    build:
+      context: .
+      dockerfile: services/service_a/Dockerfile
+    environment:
+      SERVICE_B_URL: http://service-b:8000
+      SERVICE_B_TIMEOUT_SECONDS: "3"
+    depends_on:
+      service-b:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
