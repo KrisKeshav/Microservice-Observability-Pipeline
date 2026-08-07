@@ -1,32 +1,30 @@
-# Local Microservice Observability Pipeline — Step 1
+# Local Microservice Observability Pipeline
 
-The initial HTTP call chain is:
+The HTTP call chain is:
 
 ```text
-Client -> Service A (:8000) -> Service B (:8001) -> Service C (:8002)
+Client -> Service A (:8000) -> Service B (:8001) -> Service C (:8002) -> Postgres
 ```
 
-Each service emits structured JSON logs to stdout. Service A creates a `request_id` (unless supplied by the caller) and forwards it through `X-Request-ID`, so the same request can already be correlated across all three local terminals.
+Each service emits structured JSON logs to stdout. Service A creates a `request_id` (unless supplied by the caller) and forwards it through `X-Request-ID`, so the same request can be correlated across all three services.
 
-## Run locally (plain Python)
+Service C connects to Postgres through a deliberately tiny connection pool (`DB_POOL_SIZE=3`). Under concurrent load the pool is exhausted, producing real 503 errors that are fully captured in the structured logs — no random-fail dice roll needed.
+
+## Run with Docker Compose
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+docker compose up --build -d
+docker compose ps          # wait for all services to show "healthy"
 ```
 
-Start these in three separate PowerShell windows from the project root:
+### Create and query an order
 
 ```powershell
-python -m uvicorn services.service_c.main:app --port 8002
-python -m uvicorn services.service_b.main:app --port 8001
-python -m uvicorn services.service_a.main:app --port 8000
+curl.exe -X POST http://127.0.0.1:8000/api/orders -H "Content-Type: application/json" -d "{\"order_id\": \"test-001\"}"
+curl.exe http://127.0.0.1:8000/api/orders/test-001
 ```
 
-## Demonstrate the call chain
-
-Use fixed request IDs to correlate the JSON logs in all three terminals:
+### Deterministic demo scenarios
 
 ```powershell
 # Successful request
@@ -35,34 +33,59 @@ curl.exe -i -H "X-Request-ID: demo-success-001" -H "X-Demo-Scenario: success" ht
 # C returns 500 -> B records a downstream error -> A returns 502
 curl.exe -i -H "X-Request-ID: demo-error-001" -H "X-Demo-Scenario: error" http://127.0.0.1:8000/api/orders/42
 
-# C waits 1.5s -> B times out after 0.5s -> A returns 502
+# C runs pg_sleep(2) -> B times out -> A returns 504
 curl.exe -i -H "X-Request-ID: demo-timeout-001" -H "X-Demo-Scenario: slow" http://127.0.0.1:8000/api/orders/42
 ```
 
-Without `X-Demo-Scenario`, C has a 25% intentional error rate and a 15% slow-response rate. The header is only for repeatable demonstrations.
+## Load Test — Proving the Logging Works
 
-The rates and timeouts can be adjusted using `SERVICE_C_FAILURE_RATE`, `SERVICE_C_SLOW_RATE`, `SERVICE_C_SLOW_RESPONSE_SECONDS`, `SERVICE_C_TIMEOUT_SECONDS` (Service B), and `SERVICE_B_TIMEOUT_SECONDS` (Service A).
-
-## Run with Docker Compose
-
-Docker Compose creates one private network for the three containers. Within that network, Service A reaches B at `http://service-b:8000`, and B reaches C at `http://service-c:8000`. Only Service A publishes a host port because it is the public entry point.
+Run Locust against the stack to trigger organic pool exhaustion:
 
 ```powershell
-docker compose up --build -d
-docker compose ps
+pip install locust
+cd loadtest
+locust --headless -u 50 -r 10 --run-time 30s --host http://127.0.0.1:8000
 ```
 
-Wait until all three services show `healthy`, then use the same requests from above against `http://127.0.0.1:8000`. For example:
+Then confirm the failures appear in the structured JSON logs:
 
 ```powershell
-curl.exe -i -H "X-Request-ID: compose-success-001" -H "X-Demo-Scenario: success" http://127.0.0.1:8000/api/orders/42
-curl.exe -i -H "X-Request-ID: compose-error-001" -H "X-Demo-Scenario: error" http://127.0.0.1:8000/api/orders/42
-curl.exe -i -H "X-Request-ID: compose-timeout-001" -H "X-Demo-Scenario: slow" http://127.0.0.1:8000/api/orders/42
+docker compose logs service-c | findstr "db_pool_exhausted"
 ```
 
-Inspect structured logs by service or stop the stack when finished:
+You should see multiple JSON log lines with `"event": "db_pool_exhausted"` — real database failures with full request correlation, before Kafka/Loki/Jaeger exist.
+
+### Configuration
+
+| Variable                     | Service | Default | Purpose                               |
+|------------------------------|---------|---------|---------------------------------------|
+| `DATABASE_URL`               | C       | -       | Postgres connection string            |
+| `DB_POOL_SIZE`               | C       | `3`     | Max pool connections (keep low!)      |
+| `DB_POOL_ACQUIRE_TIMEOUT`    | C       | `2.0`   | Seconds to wait for a pool slot       |
+| `SERVICE_C_TIMEOUT_SECONDS`  | B       | `0.5`   | B's timeout calling C                 |
+| `SERVICE_B_TIMEOUT_SECONDS`  | A       | `3`     | A's timeout calling B                 |
+
+## Run Locally (plain Python)
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
+
+You'll need a local Postgres running on port 5432 with database/user/password all set to `orders`, or set `DATABASE_URL` accordingly.
+
+Start in three separate terminals:
+
+```powershell
+python -m uvicorn services.service_c.main:app --port 8002
+python -m uvicorn services.service_b.main:app --port 8001
+python -m uvicorn services.service_a.main:app --port 8000
+```
+
+## Stop
 
 ```powershell
 docker compose logs -f service-a service-b service-c
-docker compose down
+docker compose down -v        # -v removes the pgdata volume
 ```

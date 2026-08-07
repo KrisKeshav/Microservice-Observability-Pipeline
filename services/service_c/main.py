@@ -1,16 +1,29 @@
 import asyncio
 import os
-import random
 
+import asyncpg
 from fastapi import FastAPI, Header, HTTPException
+from pydantic import BaseModel
 
-from common.logging import get_logger, log_event
+from common.logging import get_logger, log_event, log_error
+from common.database import init_db, close_db, get_order, get_order_slow, create_order
 
 app = FastAPI(title="Service C")
 logger = get_logger("service-c")
-FAILURE_RATE = float(os.getenv("SERVICE_C_FAILURE_RATE", "0.25"))
-SLOW_RATE = float(os.getenv("SERVICE_C_SLOW_RATE", "0.15"))
-SLOW_RESPONSE_SECONDS = float(os.getenv("SERVICE_C_SLOW_RESPONSE_SECONDS", "1.5"))
+
+
+class OrderCreate(BaseModel):
+    order_id: str
+
+
+@app.on_event("startup")
+async def startup():
+    await init_db()
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    await close_db()
 
 
 @app.get("/health")
@@ -21,24 +34,51 @@ async def health() -> dict[str, str]:
 @app.get("/internal/validate/{order_id}")
 async def validate_order(order_id: str, x_request_id: str = Header(...), x_demo_scenario: str | None = Header(default=None)) -> dict:
     request_id = x_request_id
-    scenario = x_demo_scenario or _choose_scenario()
-    log_event(logger, "request_received", request_id, order_id=order_id, service="c", scenario=scenario)
-    if scenario == "slow":
-        log_event(logger, "intentional_slow_response", request_id, order_id=order_id, service="c")
-        await asyncio.sleep(SLOW_RESPONSE_SECONDS)
-    elif scenario == "error":
-        log_event(logger, "intentional_validation_failure", request_id, order_id=order_id, service="c")
-        raise HTTPException(status_code=500, detail="Intentional Service C validation failure")
-    elif scenario != "success":
-        raise HTTPException(status_code=400, detail="X-Demo-Scenario must be success, error, or slow")
+    log_event(logger, "request_received", request_id, order_id=order_id, service="c")
+
+    if x_demo_scenario == "error":
+        log_error(logger, "forced_validation_failure", request_id, order_id=order_id, service="c")
+        raise HTTPException(status_code=500, detail="Forced Service C validation failure")
+
+    try:
+        log_event(logger, "db_query_start", request_id, order_id=order_id, service="c")
+        if x_demo_scenario == "slow":
+            result = await get_order_slow(order_id)
+        else:
+            result = await get_order(order_id)
+        log_event(logger, "db_query_success", request_id, order_id=order_id, service="c")
+    except (asyncpg.exceptions.InterfaceError, asyncio.TimeoutError) as exc:
+        log_error(logger, "db_pool_exhausted", request_id,
+                  order_id=order_id, service="c",
+                  error_type=type(exc).__name__, error=str(exc))
+        raise HTTPException(status_code=503, detail="Database connection pool exhausted")
+    except Exception as exc:
+        log_error(logger, "db_error", request_id,
+                  order_id=order_id, service="c",
+                  error_type=type(exc).__name__, error=str(exc))
+        raise HTTPException(status_code=500, detail="Database error")
+
     log_event(logger, "request_completed", request_id, order_id=order_id, service="c")
-    return {"service": "c", "order_id": order_id, "valid": True}
+    return {"service": "c", "order_id": order_id, "valid": True, "record": result}
 
 
-def _choose_scenario() -> str:
-    roll = random.random()
-    if roll < FAILURE_RATE:
-        return "error"
-    if roll < FAILURE_RATE + SLOW_RATE:
-        return "slow"
-    return "success"
+@app.post("/internal/orders")
+async def create_order_endpoint(body: OrderCreate, x_request_id: str = Header(...)) -> dict:
+    request_id = x_request_id
+    log_event(logger, "create_order_received", request_id, order_id=body.order_id, service="c")
+
+    try:
+        result = await create_order(body.order_id)
+        log_event(logger, "order_created", request_id, order_id=body.order_id, service="c")
+    except (asyncpg.exceptions.InterfaceError, asyncio.TimeoutError) as exc:
+        log_error(logger, "db_pool_exhausted", request_id,
+                  order_id=body.order_id, service="c",
+                  error_type=type(exc).__name__, error=str(exc))
+        raise HTTPException(status_code=503, detail="Database connection pool exhausted")
+    except Exception as exc:
+        log_error(logger, "db_error", request_id,
+                  order_id=body.order_id, service="c",
+                  error_type=type(exc).__name__, error=str(exc))
+        raise HTTPException(status_code=500, detail="Database error")
+
+    return {"service": "c", "order": result}

@@ -25,3 +25,8 @@ def get_logger(service: str) -> logging.Logger:
 def log_event(logger: logging.Logger, event: str, request_id: str, **fields: object) -> None:
     """Log an event with correlation fields kept at the top level of the JSON line."""
     logger.info(event, extra={"event": event, "request_id": request_id, **fields})
+
+
+def log_error(logger: logging.Logger, event: str, request_id: str, **fields: object) -> None:
+    """Same as log_event but at ERROR level — pool exhaustion, DB errors, etc."""
+    logger.error(event, extra={"event": event, "request_id": request_id, **fields})
