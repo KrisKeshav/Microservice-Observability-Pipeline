@@ -10,6 +10,35 @@ Each service emits structured JSON logs to stdout. Service A creates a `request_
 
 Service C connects to Postgres through a deliberately tiny connection pool (`DB_POOL_SIZE=3`). Under concurrent load the pool is exhausted, producing real 503 errors that are fully captured in the structured logs — no random-fail dice roll needed.
 
+## Run with Kubernetes (Minikube / Docker Desktop)
+
+```powershell
+# Build container images and apply manifests via Kustomize
+.\k8s\deploy.ps1
+
+# Check rollout status
+kubectl get pods,svc
+```
+
+### Accessing Service A in Kubernetes
+
+Via NodePort (Port 30080):
+```powershell
+curl.exe http://127.0.0.1:30080/api/orders/42
+```
+
+Or using `kubectl port-forward`:
+```powershell
+kubectl port-forward svc/service-a 8000:8000
+curl.exe http://127.0.0.1:8000/api/orders/42
+```
+
+### Clean up Kubernetes Resources
+
+```powershell
+kubectl delete -k k8s/
+```
+
 ## Run with Docker Compose
 
 ```powershell

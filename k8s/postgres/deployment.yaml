@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: postgres-secret
+          ports:
+            - containerPort: 5432
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "orders"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "orders"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: postgres-storage
+              mountPath: /var/lib/postgresql/data
+            - name: init-sql
+              mountPath: /docker-entrypoint-initdb.d
+      volumes:
+        - name: postgres-storage
+          persistentVolumeClaim:
+            claimName: postgres-pvc
+        - name: init-sql
+          configMap:
+            name: postgres-init-sql
