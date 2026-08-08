@@ -10,3 +10,8 @@ resources:
   - services/service-c.yaml
   - services/service-b.yaml
   - services/service-a.yaml
+  - kafka/kafka.yaml
+  - logging/loki.yaml
+  - logging/fluent-bit-shipper.yaml
+  - logging/fluent-bit-consumer.yaml
+  - logging/grafana.yaml

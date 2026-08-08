@@ -10,6 +10,18 @@ Each service emits structured JSON logs to stdout. Service A creates a `request_
 
 Service C connects to Postgres through a deliberately tiny connection pool (`DB_POOL_SIZE=3`). Under concurrent load the pool is exhausted, producing real 503 errors that are fully captured in the structured logs — no random-fail dice roll needed.
 
+## Log Telemetry Pipeline Architecture
+
+```text
+Pod Stdout -> Fluent Bit Shipper (DaemonSet) -> Kafka (app-logs) -> Fluent Bit Consumer -> Loki -> Grafana (:30300)
+```
+
+1. **Fluent Bit Shipper**: Tails `/var/log/containers/*.log`, extracts container log payload & K8s metadata, and publishes to Kafka topic `app-logs`.
+2. **Kafka Broker**: Acts as the high-throughput log buffer in KRaft mode.
+3. **Fluent Bit Consumer**: Reads logs from Kafka topic `app-logs` and forwards them to Grafana Loki.
+4. **Grafana Loki**: Stores log streams indexed by labels (`service`, `request_id`, `levelname`).
+5. **Grafana**: Pre-configured with Loki data source at `http://127.0.0.1:30300` (admin / admin). Query logs by `{job="fluent-bit"}` or `{request_id="<uuid>"}`.
+
 ## Run with Kubernetes (Minikube / Docker Desktop)
 
 ```powershell
