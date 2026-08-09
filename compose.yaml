@@ -71,5 +71,18 @@ services:
       retries: 5
       start_period: 5s
 
+  anomaly-detector:
+    build:
+      context: .
+      dockerfile: services/anomaly_detector/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://orders:orders@postgres:5432/orders
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      ANOMALY_WINDOW_SEC: "60"
+      ANOMALY_THRESHOLD: "5"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   pgdata:

@@ -1,0 +1,101 @@
+# Step 5: Anomaly Detector — Second Kafka Consumer
+
+A standalone Python service that reads from the **same** `app-logs` Kafka topic (different consumer group) and flags error-rate spikes. This is the proof-of-value for Kafka's decoupling — two independent consumers, zero coordination.
+
+## Architecture
+
+```text
+                                ┌─ Fluent Bit Consumer ─→ Loki ─→ Grafana
+Pod stdout → Fluent Bit → Kafka ┤
+                                └─ Anomaly Detector ─→ Postgres (anomaly_alerts)
+```
+
+The anomaly detector runs a **sliding 60-second window**. Every 10 seconds it evaluates whether the error rate (log lines with `levelname=ERROR` or events like `db_pool_exhausted`, `service_*_error`, `service_*_timeout`) exceeds a configurable threshold (default: 5 errors/window). When triggered, it writes an alert row to `anomaly_alerts` in Postgres and logs a structured JSON warning to stdout (which itself gets picked up by Fluent Bit → Kafka → Loki — visible in Grafana).
+
+> [!IMPORTANT]
+> The detector uses `confluent-kafka` (librdkafka-based) rather than `kafka-python` because `kafka-python` is unmaintained and has known issues with KRaft-mode brokers. This adds a new dependency to `requirements.txt`.
+
+## Proposed Changes
+
+### Python Service
+
+#### [NEW] [services/anomaly_detector/\_\_init\_\_.py](file:///c:/Users/krish/OneDrive/Desktop/MyProject/services/anomaly_detector/__init__.py)
+Empty module init.
+
+#### [NEW] [services/anomaly_detector/main.py](file:///c:/Users/krish/OneDrive/Desktop/MyProject/services/anomaly_detector/main.py)
+- FastAPI app with `/health` and `GET /alerts` endpoints.
+- Background task on startup that:
+  1. Connects to Kafka topic `app-logs` with consumer group `anomaly-detector`.
+  2. Maintains a deque of `(timestamp, is_error)` tuples representing the sliding window.
+  3. Every 10s evaluates the window — if error count > threshold, inserts a row into `anomaly_alerts` and logs a structured warning.
+- On startup, connects to Postgres and creates the `anomaly_alerts` table.
+
+#### [NEW] [services/anomaly_detector/Dockerfile](file:///c:/Users/krish/OneDrive/Desktop/MyProject/services/anomaly_detector/Dockerfile)
+Same base pattern as existing services (`python:3.12-slim`).
+
+---
+
+### Database Schema
+
+#### [MODIFY] [k8s/postgres/configmap.yaml](file:///c:/Users/krish/OneDrive/Desktop/MyProject/k8s/postgres/configmap.yaml)
+Add `anomaly_alerts` table to `init.sql`:
+
+```sql
+CREATE TABLE IF NOT EXISTS anomaly_alerts (
+    id          SERIAL PRIMARY KEY,
+    detected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    window_sec  INT         NOT NULL,
+    error_count INT         NOT NULL,
+    total_count INT         NOT NULL,
+    error_rate  REAL        NOT NULL,
+    details     JSONB
+);
+```
+
+---
+
+### Kubernetes Manifests
+
+#### [NEW] [k8s/services/anomaly-detector.yaml](file:///c:/Users/krish/OneDrive/Desktop/MyProject/k8s/services/anomaly-detector.yaml)
+- Deployment (1 replica) with `DATABASE_URL`, `KAFKA_BOOTSTRAP_SERVERS`, `ANOMALY_WINDOW_SEC`, `ANOMALY_THRESHOLD` env vars.
+- ClusterIP Service exposing port 8000.
+
+#### [MODIFY] [k8s/kustomization.yaml](file:///c:/Users/krish/OneDrive/Desktop/MyProject/k8s/kustomization.yaml)
+Add `services/anomaly-detector.yaml` to resources list.
+
+#### [MODIFY] [k8s/deploy.ps1](file:///c:/Users/krish/OneDrive/Desktop/MyProject/k8s/deploy.ps1)
+Build and load the `anomaly-detector:latest` image alongside the existing services.
+
+---
+
+### Dependencies
+
+#### [MODIFY] [requirements.txt](file:///c:/Users/krish/OneDrive/Desktop/MyProject/requirements.txt)
+Add `confluent-kafka>=2.6,<3.0`.
+
+---
+
+### Documentation
+
+#### [MODIFY] [README.md](file:///c:/Users/krish/OneDrive/Desktop/MyProject/README.md)
+Document the anomaly detector's purpose, the Kafka fan-out architecture, and how to query `anomaly_alerts` in Postgres or view detector logs in Grafana.
+
+## Verification Plan
+
+### Automated / Command Verification
+1. `kubectl kustomize k8s/` — validates all manifests.
+2. After deployment, generate errors via load test or demo scenario:
+   ```powershell
+   # produce a burst of errors
+   for ($i=0; $i -lt 10; $i++) {
+       curl.exe -s -H "X-Demo-Scenario: error" http://127.0.0.1:30080/api/orders/42
+   }
+   ```
+3. Check anomaly_alerts table:
+   ```powershell
+   kubectl exec -it deploy/postgres -- psql -U orders -c "SELECT * FROM anomaly_alerts ORDER BY detected_at DESC LIMIT 5;"
+   ```
+4. Check detector logs for structured alert output:
+   ```powershell
+   kubectl logs deploy/anomaly-detector --tail=20
+   ```

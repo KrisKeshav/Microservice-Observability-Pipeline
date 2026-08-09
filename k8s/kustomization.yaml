@@ -10,6 +10,7 @@ resources:
   - services/service-c.yaml
   - services/service-b.yaml
   - services/service-a.yaml
+  - services/anomaly-detector.yaml
   - kafka/kafka.yaml
   - logging/loki.yaml
   - logging/fluent-bit-shipper.yaml
