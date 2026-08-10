@@ -108,8 +108,29 @@ You should see multiple JSON log lines with `"event": "db_pool_exhausted"` — r
 | `KAFKA_BOOTSTRAP_SERVERS`    | AD      | `localhost:9092` | Kafka broker endpoint               |
 | `ANOMALY_WINDOW_SEC`         | AD      | `60`    | Sliding window size for rate evaluation |
 | `ANOMALY_THRESHOLD`          | AD      | `5`     | Min errors in window to trigger alert |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`| A / B / C| `http://jaeger:4317` | OTLP gRPC export endpoint for Jaeger |
+
+## Step 6: OpenTelemetry + Jaeger (Distributed Tracing)
+
+Each FastAPI service (`service-a`, `service-b`, `service-c`) is auto-instrumented with OpenTelemetry to generate distributed traces across HTTP calls and database queries. Structured logs in stdout include `trace_id` and `span_id` for correlation.
+
+### Access Jaeger UI
+
+- **Docker Compose**: Open [http://127.0.0.1:16686](http://127.0.0.1:16686)
+- **Kubernetes**: Open [http://127.0.0.1:31686](http://127.0.0.1:31686) (or run `kubectl port-forward svc/jaeger 16686:16686`)
+
+### Verify End-to-End Traces
+
+1. Send an HTTP request to Service A:
+   ```powershell
+   curl.exe http://127.0.0.1:8000/api/orders/42
+   ```
+2. Open Jaeger UI at `http://127.0.0.1:16686`.
+3. Select `service-a` under **Service** and click **Find Traces**.
+4. Click on the trace to inspect the complete call chain: `service-a` -> `service-b` -> `service-c` -> `asyncpg` SQL query.
 
 ## Step 5: Anomaly Detector (Second Kafka Consumer)
+
 
 The `anomaly-detector` service acts as an independent consumer of the `app-logs` Kafka topic (using consumer group `anomaly-detector`). It proves Kafka's fan-out capabilities by evaluating error rate spikes over a sliding 60-second window.
 

@@ -7,9 +7,12 @@ from pydantic import BaseModel
 
 from common.logging import get_logger, log_event, log_error
 from common.database import init_db, close_db, get_order, get_order_slow, create_order
+from common.tracing import setup_telemetry
 
 app = FastAPI(title="Service C")
+setup_telemetry(app, "service-c")
 logger = get_logger("service-c")
+
 
 
 class OrderCreate(BaseModel):

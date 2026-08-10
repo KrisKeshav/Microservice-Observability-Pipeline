@@ -1,20 +1,18 @@
-"""Structured logging helpers shared by all services."""
-
 import logging
 import sys
 
 from pythonjsonlogger.json import JsonFormatter
+from opentelemetry import trace
 
 
 def get_logger(service: str) -> logging.Logger:
-    """Return a stdout logger whose records are one JSON object per line."""
     logger = logging.getLogger(service)
     if logger.handlers:
         return logger
 
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(
-        JsonFormatter("%(asctime)s %(levelname)s %(name)s %(message)s %(request_id)s %(event)s")
+        JsonFormatter("%(asctime)s %(levelname)s %(name)s %(message)s %(request_id)s %(event)s %(trace_id)s %(span_id)s")
     )
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
@@ -22,11 +20,23 @@ def get_logger(service: str) -> logging.Logger:
     return logger
 
 
+def _get_trace_context() -> dict[str, str]:
+    span = trace.get_current_span()
+    ctx = span.get_span_context()
+    if ctx and ctx.is_valid:
+        return {
+            "trace_id": f"{ctx.trace_id:032x}",
+            "span_id": f"{ctx.span_id:016x}",
+        }
+    return {}
+
+
 def log_event(logger: logging.Logger, event: str, request_id: str, **fields: object) -> None:
-    """Log an event with correlation fields kept at the top level of the JSON line."""
-    logger.info(event, extra={"event": event, "request_id": request_id, **fields})
+    extra = {"event": event, "request_id": request_id, **_get_trace_context(), **fields}
+    logger.info(event, extra=extra)
 
 
 def log_error(logger: logging.Logger, event: str, request_id: str, **fields: object) -> None:
-    """Same as log_event but at ERROR level — pool exhaustion, DB errors, etc."""
-    logger.error(event, extra={"event": event, "request_id": request_id, **fields})
+    extra = {"event": event, "request_id": request_id, **_get_trace_context(), **fields}
+    logger.error(event, extra=extra)
+

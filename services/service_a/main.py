@@ -6,11 +6,14 @@ from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 from common.logging import get_logger, log_event
+from common.tracing import setup_telemetry
 
 app = FastAPI(title="Service A")
+setup_telemetry(app, "service-a")
 logger = get_logger("service-a")
 SERVICE_B_URL = os.getenv("SERVICE_B_URL", "http://127.0.0.1:8001")
 SERVICE_B_TIMEOUT_SECONDS = float(os.getenv("SERVICE_B_TIMEOUT_SECONDS", "3"))
+
 
 
 class OrderCreate(BaseModel):

@@ -17,6 +17,15 @@ services:
       retries: 10
       start_period: 5s
 
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+      - "4318:4318"
+
   service-c:
     build:
       context: .
@@ -25,9 +34,12 @@ services:
       DATABASE_URL: postgresql://orders:orders@postgres:5432/orders
       DB_POOL_SIZE: "3"
       DB_POOL_ACQUIRE_TIMEOUT: "0.5"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     depends_on:
       postgres:
         condition: service_healthy
+      jaeger:
+        condition: service_started
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 5s
@@ -42,6 +54,7 @@ services:
     environment:
       SERVICE_C_URL: http://service-c:8000
       SERVICE_C_TIMEOUT_SECONDS: "5"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     depends_on:
       service-c:
         condition: service_healthy
@@ -59,6 +72,7 @@ services:
     environment:
       SERVICE_B_URL: http://service-b:8000
       SERVICE_B_TIMEOUT_SECONDS: "5"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     depends_on:
       service-b:
         condition: service_healthy
@@ -83,6 +97,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+
 
 volumes:
   pgdata:

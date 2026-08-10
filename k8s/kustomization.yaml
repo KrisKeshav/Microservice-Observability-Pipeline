@@ -16,3 +16,5 @@ resources:
   - logging/fluent-bit-shipper.yaml
   - logging/fluent-bit-consumer.yaml
   - logging/grafana.yaml
+  - tracing/jaeger.yaml
+

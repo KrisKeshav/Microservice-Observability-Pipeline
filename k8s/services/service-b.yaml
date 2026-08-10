@@ -25,6 +25,9 @@ spec:
               value: "http://service-c:8000"
             - name: SERVICE_C_TIMEOUT_SECONDS
               value: "5"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://jaeger:4317"
+
           readinessProbe:
             httpGet:
               path: /health

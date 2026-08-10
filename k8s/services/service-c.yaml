@@ -27,6 +27,9 @@ spec:
               value: "3"
             - name: DB_POOL_ACQUIRE_TIMEOUT
               value: "0.5"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://jaeger:4317"
+
           readinessProbe:
             httpGet:
               path: /health
