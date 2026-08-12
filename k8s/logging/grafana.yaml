@@ -8,12 +8,274 @@ data:
     apiVersion: 1
     datasources:
       - name: Loki
+        uid: loki
         type: loki
         access: proxy
         url: http://loki:3100
         isDefault: true
         jsonData:
           maxLines: 1000
+          derivedFields:
+            - name: TraceID
+              matcherRegex: '"trace_id":\s*"([a-f0-9]+)"'
+              url: "http://localhost:31686/trace/$${__value.raw}"
+              datasourceUid: "jaeger"
+              urlDisplayLabel: "View Trace in Jaeger"
+      - name: Jaeger
+        uid: jaeger
+        type: jaeger
+        access: proxy
+        url: http://jaeger:16686
+      - name: PostgreSQL
+        uid: postgres
+        type: postgres
+        access: proxy
+        url: postgres:5432
+        user: orders
+        secureJsonData:
+          password: orders
+        jsonData:
+          database: orders
+          sslmode: disable
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards-provider
+  namespace: default
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: 'default'
+        orgId: 1
+        folder: ''
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  namespace: default
+data:
+  observability-dashboard.json: |
+    {
+      "annotations": {
+        "list": [
+          {
+            "builtIn": 1,
+            "datasource": "-- Grafana --",
+            "enable": true,
+            "hide": true,
+            "name": "Annotations & Alerts",
+            "type": "dashboard"
+          }
+        ]
+      },
+      "editable": true,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 0,
+      "id": null,
+      "links": [],
+      "liveNow": false,
+      "panels": [
+        {
+          "collapsed": false,
+          "gridPos": {
+            "h": 4,
+            "w": 24,
+            "x": 0,
+            "y": 0
+          },
+          "id": 1,
+          "options": {
+            "code": {
+              "language": "plaintext",
+              "showLineNumbers": false
+            },
+            "content": "### 🚀 Microservice Observability Pipeline\n**HTTP Chain:** Client ➔ Service A (`:8000`) ➔ Service B (`:8001`) ➔ Service C (`:8002`) ➔ Postgres DB\n**Telemetry Flow:** Container Stdout ➔ Fluent Bit Shipper ➔ Kafka ➔ Fluent Bit Consumer ➔ Loki & Jaeger\n\n* **Request Correlation:** Filter by `request_id` (e.g. `demo-success-001`, `demo-error-001`, `demo-timeout-001`) to view end-to-end log flow.\n* **Trace Link:** Expand any log line containing `trace_id` and click **TraceID** (or **View Trace in Jaeger**) to inspect the OpenTelemetry span graph.",
+            "mode": "markdown"
+          },
+          "pluginVersion": "10.0.0",
+          "title": "Pipeline Overview & Demo Guide",
+          "type": "text"
+        },
+        {
+          "collapsed": false,
+          "gridPos": {
+            "h": 8,
+            "w": 14,
+            "x": 0,
+            "y": 4
+          },
+          "id": 2,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "sum(count_over_time({job=\"fluent-bit\"} | json [1m])) by (service)",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "Log Rate by Service (logs/min)",
+          "type": "timeseries"
+        },
+        {
+          "collapsed": false,
+          "gridPos": {
+            "h": 8,
+            "w": 10,
+            "x": 14,
+            "y": 4
+          },
+          "id": 3,
+          "options": {
+            "footer": {
+              "fields": "",
+              "reducer": ["sum"],
+              "show": false
+            },
+            "frameIndex": 0,
+            "showHeader": true
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "postgres",
+                "uid": "postgres"
+              },
+              "editorMode": "builder",
+              "format": "table",
+              "rawSql": "SELECT id, service_name, error_count, window_start, created_at FROM anomaly_alerts ORDER BY id DESC LIMIT 10;",
+              "refId": "A"
+            }
+          ],
+          "title": "Database Anomaly Alerts (Postgres)",
+          "type": "table"
+        },
+        {
+          "collapsed": false,
+          "gridPos": {
+            "h": 12,
+            "w": 24,
+            "x": 0,
+            "y": 12
+          },
+          "id": 4,
+          "options": {
+            "dedupStrategy": "none",
+            "enableLogDetails": true,
+            "showLabels": false,
+            "showCommonLabels": false,
+            "showLogLabels": true,
+            "showTime": true,
+            "sortOrder": "Descending",
+            "wrapLogMessage": true
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "{job=\"fluent-bit\"} | json | request_id =~ \"(?i).*${request_id}.*\"",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "Unified Log Telemetry Stream (Filterable by Request ID)",
+          "type": "logs"
+        },
+        {
+          "collapsed": false,
+          "gridPos": {
+            "h": 10,
+            "w": 24,
+            "x": 0,
+            "y": 24
+          },
+          "id": 5,
+          "options": {
+            "dedupStrategy": "none",
+            "enableLogDetails": true,
+            "showLabels": false,
+            "showCommonLabels": false,
+            "showLogLabels": true,
+            "showTime": true,
+            "sortOrder": "Descending",
+            "wrapLogMessage": true
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "editorMode": "code",
+              "expr": "{job=\"fluent-bit\"} | json | levelname = \"ERROR\"",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "Error Logs Stream",
+          "type": "logs"
+        }
+      ],
+      "refresh": "5s",
+      "schemaVersion": 38,
+      "style": "dark",
+      "tags": ["observability", "microservices", "loki", "jaeger"],
+      "templating": {
+        "list": [
+          {
+            "current": {
+              "selected": false,
+              "text": "",
+              "value": ""
+            },
+            "hide": 0,
+            "label": "Request ID Filter",
+            "name": "request_id",
+            "options": [],
+            "query": "",
+            "skipUrlSync": false,
+            "type": "textbox"
+          }
+        ]
+      },
+      "time": {
+        "from": "now-15m",
+        "to": "now"
+      },
+      "timepicker": {
+        "refresh_intervals": ["5s", "10s", "30s", "1m"]
+      },
+      "timezone": "browser",
+      "title": "Microservice Observability Pipeline",
+      "uid": "microservice-observability",
+      "version": 1
+    }
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -45,13 +307,25 @@ spec:
               value: "admin"
             - name: GF_USERS_ALLOW_SIGN_UP
               value: "false"
+            - name: GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH
+              value: "/var/lib/grafana/dashboards/observability-dashboard.json"
           volumeMounts:
             - name: datasources
               mountPath: /etc/grafana/provisioning/datasources
+            - name: dashboard-providers
+              mountPath: /etc/grafana/provisioning/dashboards
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
       volumes:
         - name: datasources
           configMap:
             name: grafana-datasources
+        - name: dashboard-providers
+          configMap:
+            name: grafana-dashboards-provider
+        - name: dashboards
+          configMap:
+            name: grafana-dashboards
 ---
 apiVersion: v1
 kind: Service

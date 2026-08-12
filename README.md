@@ -129,6 +129,35 @@ Each FastAPI service (`service-a`, `service-b`, `service-c`) is auto-instrumente
 3. Select `service-a` under **Service** and click **Find Traces**.
 4. Click on the trace to inspect the complete call chain: `service-a` -> `service-b` -> `service-c` -> `asyncpg` SQL query.
 
+## Step 7: Grafana Dashboard (The Single Screen Demo)
+
+Grafana comes pre-configured with Loki, Jaeger, and PostgreSQL data sources, automatically loading the **Microservice Observability Pipeline** dashboard at startup.
+
+### Access Grafana UI
+
+- **Kubernetes**: Open [http://127.0.0.1:30300](http://127.0.0.1:30300) (Default login: `admin` / `admin`).
+
+### Pipeline Demo & Trace Correlation
+
+1. **Trigger a Request**:
+   ```powershell
+   curl.exe -i -H "X-Request-ID: demo-step7-001" -H "X-Demo-Scenario: slow" http://127.0.0.1:8000/api/orders/42
+   ```
+
+2. **Filter Logs by Request ID**:
+   - Open Grafana at [http://127.0.0.1:30300](http://127.0.0.1:30300).
+   - In the **Request ID Filter** text box at the top, enter `demo-step7-001`.
+   - The unified log stream instantly displays correlated log events in sequence from `service-a`, `service-b`, and `service-c`.
+
+3. **Navigate from Log to Jaeger Trace**:
+   - Expand any log entry in the **Unified Log Telemetry Stream** panel.
+   - Click the **TraceID** (or **View Trace in Jaeger**) link next to `trace_id`.
+   - Grafana jumps directly into the matching Jaeger distributed trace UI.
+
+4. **Live Telemetry & Anomaly Alerts**:
+   - View real-time log ingestion rate graphs per service.
+   - Monitor database anomaly alerts generated in PostgreSQL by `anomaly-detector`.
+
 ## Step 5: Anomaly Detector (Second Kafka Consumer)
 
 
