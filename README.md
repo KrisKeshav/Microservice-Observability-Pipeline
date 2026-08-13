@@ -1,200 +1,224 @@
-# Local Microservice Observability Pipeline
+# Microservice Observability Pipeline
 
-The HTTP call chain is:
+A production-grade, distributed microservice telemetry pipeline built with **FastAPI**, **Kubernetes**, **Apache Kafka**, **Fluent Bit**, **Grafana Loki**, **Jaeger**, and **Grafana**. 
 
-```text
-Client -> Service A (:8000) -> Service B (:8001) -> Service C (:8002) -> Postgres
+Demonstrates end-to-end request correlation, distributed tracing across microservices, streaming log telemetry, real-time anomaly detection, and deterministic failure injection under load.
+
+---
+
+## 🏗️ System Architecture
+
+### 1. HTTP Microservice Request Flow
+
+```mermaid
+flowchart LR
+    Client([Client / Load Test]) -->|HTTP GET / POST| SA[Service A :8000]
+    SA -->|HTTP /internal/orders| SB[Service B :8001]
+    SB -->|HTTP /internal/validate| SC[Service C :8002]
+    SC -->|asyncpg pool max_size=3| DB[(PostgreSQL)]
+
+    style SA fill:#1f2937,stroke:#3b82f6,stroke-width:2px,color:#fff
+    style SB fill:#1f2937,stroke:#3b82f6,stroke-width:2px,color:#fff
+    style SC fill:#1f2937,stroke:#ef4444,stroke-width:2px,color:#fff
+    style DB fill:#111827,stroke:#10b981,stroke-width:2px,color:#fff
 ```
 
-Each service emits structured JSON logs to stdout. Service A creates a `request_id` (unless supplied by the caller) and forwards it through `X-Request-ID`, so the same request can be correlated across all three services.
+* **Service A**: API Gateway facing clients. Injects or forwards `X-Request-ID`.
+* **Service B**: Business logic coordinator.
+* **Service C**: Data access service connected to PostgreSQL via an intentionally tiny connection pool (`DB_POOL_SIZE=3`).
 
-Service C connects to Postgres through a deliberately tiny connection pool (`DB_POOL_SIZE=3`). Under concurrent load the pool is exhausted, producing real 503 errors that are fully captured in the structured logs — no random-fail dice roll needed.
+---
 
-## Log Telemetry Pipeline Architecture
+### 2. Telemetry & Data Streaming Pipeline
 
-```text
-Pod Stdout -> Fluent Bit Shipper (DaemonSet) -> Kafka (app-logs) -> Fluent Bit Consumer -> Loki -> Grafana (:30300)
+```mermaid
+flowchart TD
+    subgraph Cluster ["Kubernetes Cluster"]
+        subgraph Microservices ["FastAPI Pods"]
+            SA[Service A]
+            SB[Service B]
+            SC[Service C]
+        end
+
+        subgraph LogCollection ["Log Shipping & Ingestion"]
+            FBS["Fluent Bit Shipper\n(DaemonSet)"]
+            Kafka{{"Apache Kafka\n(Topic: app-logs)"}}
+            FBC["Fluent Bit Consumer\n(Deployment)"]
+            Loki[(Grafana Loki)]
+        end
+
+        subgraph Tracing ["Distributed Tracing"]
+            OTEL[OpenTelemetry SDK]
+            Jaeger[(Jaeger Tracing)]
+        end
+
+        subgraph Alerting ["Stream Processing & Alerts"]
+            AD["Anomaly Detector\n(Kafka Consumer)"]
+            PG[(PostgreSQL)]
+        end
+    end
+
+    subgraph Observability ["Unified Monitoring"]
+        Grafana[Grafana Dashboard]
+    end
+
+    SA -.->|stdout JSON logs| FBS
+    SB -.->|stdout JSON logs| FBS
+    SC -.->|stdout JSON logs| FBS
+
+    SA -.->|OTLP gRPC| OTEL
+    SB -.->|OTLP gRPC| OTEL
+    SC -.->|OTLP gRPC| OTEL
+    OTEL --> Jaeger
+
+    FBS -->|Publish| Kafka
+    Kafka -->|Group: loki-consumer| FBC
+    Kafka -->|Group: anomaly-detector| AD
+    FBC -->|Ship logs| Loki
+    AD -->|Record alerts| PG
+
+    Loki -->|Log Streams| Grafana
+    Jaeger -->|Trace Graphs| Grafana
+    PG -->|Alert Table| Grafana
 ```
 
-1. **Fluent Bit Shipper**: Tails `/var/log/containers/*.log`, extracts container log payload & K8s metadata, and publishes to Kafka topic `app-logs`.
-2. **Kafka Broker**: Acts as the high-throughput log buffer in KRaft mode.
-3. **Fluent Bit Consumer**: Reads logs from Kafka topic `app-logs` and forwards them to Grafana Loki.
-4. **Grafana Loki**: Stores log streams indexed by labels (`service`, `request_id`, `levelname`).
-5. **Grafana**: Pre-configured with Loki data source at `http://127.0.0.1:30300` (admin / admin). Query logs by `{job="fluent-bit"}` or `{request_id="<uuid>"}`.
+---
 
-## Run with Kubernetes (Minikube / Docker Desktop)
+## 💡 Why Each Tool?
+
+| Component | Technology | Purpose & Technical Rationale |
+| :--- | :--- | :--- |
+| **Log Buffer** | **Apache Kafka** | High-throughput broker providing backpressure decoupling. Allows fan-out streaming so multiple consumers (Loki shipper & anomaly detector) ingest logs independently without touching microservice containers. |
+| **Log Shipper** | **Fluent Bit** | Lightweight C-based log agent (~few MB RAM vs Logstash's 500MB+). DaemonSet tails pod container logs, enriches with Kubernetes pod metadata, and publishes to Kafka. |
+| **Log Storage** | **Grafana Loki** | Index-free log aggregation engine. Indexes metadata labels only, minimizing storage overhead while supporting flexible LogQL filtering by `request_id` or `levelname`. |
+| **Distributed Tracing** | **Jaeger & OpenTelemetry** | Standardized OTLP gRPC instrumentation across HTTP calls and SQL queries. Visualizes microservice span graphs and execution latencies. |
+| **Single Pane Visualizer** | **Grafana** | Centralized dashboard integrating Loki log streams, PostgreSQL alert tables, log-rate time series metrics, and 1-click derived field links into Jaeger traces. |
+| **Deterministic Failure** | **asyncpg (Pool = 3)** | Service C limits database connection pool size to 3. Under load, connection pool contention triggers real `503 Service Unavailable` failures and cascading HTTP timeouts without relying on artificial dice rolls. |
+
+---
+
+## ⚡ Quick Start
+
+### Prerequisites
+* Docker Desktop or Minikube
+* `kubectl` CLI
+* Python 3.10+ (for running load tests locally)
+
+### Option A: Deploy on Kubernetes (Recommended)
 
 ```powershell
-# Build container images and apply manifests via Kustomize
+# 1. Build container images and apply all Kubernetes manifests
 .\k8s\deploy.ps1
 
-# Check rollout status
+# 2. Verify rollout status
 kubectl get pods,svc
 ```
 
-### Accessing Service A in Kubernetes
+Access endpoints:
+* **Service A (API Gateway)**: `http://127.0.0.1:30080` (or `kubectl port-forward svc/service-a 8000:8000`)
+* **Grafana Dashboard**: [http://127.0.0.1:30300](http://127.0.0.1:30300) (User: `admin` / Password: `admin`)
+* **Jaeger UI**: [http://127.0.0.1:31686](http://127.0.0.1:31686)
 
-Via NodePort (Port 30080):
-```powershell
-curl.exe http://127.0.0.1:30080/api/orders/42
-```
-
-Or using `kubectl port-forward`:
-```powershell
-kubectl port-forward svc/service-a 8000:8000
-curl.exe http://127.0.0.1:8000/api/orders/42
-```
-
-### Clean up Kubernetes Resources
+### Option B: Deploy with Docker Compose
 
 ```powershell
-kubectl delete -k k8s/
-```
-
-## Run with Docker Compose
-
-```powershell
+# Build and start all services
 docker compose up --build -d
-docker compose ps          # wait for all services to show "healthy"
+
+# Check health status
+docker compose ps
 ```
 
-### Create and query an order
+---
+
+## 🧪 Scenarios & Failure Injection
+
+Trigger deterministic request behaviors using HTTP headers:
 
 ```powershell
-curl.exe -X POST http://127.0.0.1:8000/api/orders -H "Content-Type: application/json" -d "{\"order_id\": \"test-001\"}"
-curl.exe http://127.0.0.1:8000/api/orders/test-001
+# 1. Successful request chain
+curl.exe -i -H "X-Request-ID: demo-success-001" -H "X-Demo-Scenario: success" http://127.0.0.1:30080/api/orders/42
+
+# 2. Forced validation error (Service C raises 500 -> B returns 502 -> A returns 502)
+curl.exe -i -H "X-Request-ID: demo-error-001" -H "X-Demo-Scenario: error" http://127.0.0.1:30080/api/orders/42
+
+# 3. Cascading timeout (Service C runs pg_sleep(2) -> B times out -> A returns 504)
+curl.exe -i -H "X-Request-ID: demo-timeout-001" -H "X-Demo-Scenario: slow" http://127.0.0.1:30080/api/orders/42
 ```
 
-### Deterministic demo scenarios
+---
+
+## 🚀 Load Testing (Full Pipeline)
+
+Run Locust against the Kubernetes cluster to trigger database connection pool exhaustion across the entire stack:
 
 ```powershell
-# Successful request
-curl.exe -i -H "X-Request-ID: demo-success-001" -H "X-Demo-Scenario: success" http://127.0.0.1:8000/api/orders/42
-
-# C returns 500 -> B records a downstream error -> A returns 502
-curl.exe -i -H "X-Request-ID: demo-error-001" -H "X-Demo-Scenario: error" http://127.0.0.1:8000/api/orders/42
-
-# C runs pg_sleep(2) -> B times out -> A returns 504
-curl.exe -i -H "X-Request-ID: demo-timeout-001" -H "X-Demo-Scenario: slow" http://127.0.0.1:8000/api/orders/42
+# Execute automated load test against K8s cluster
+.\loadtest\full_pipeline_test.ps1
 ```
 
-## Load Test — Proving the Logging Works
-
-Run Locust against the stack to trigger organic pool exhaustion:
+Or execute directly with Locust:
 
 ```powershell
-pip install locust
+pip install -r requirements.txt
 cd loadtest
-locust --headless -u 50 -r 10 --run-time 30s --host http://127.0.0.1:8000
+locust -f locustfile.py --headless -u 100 -r 20 --run-time 45s --host http://127.0.0.1:30080
 ```
 
-Then confirm the failures appear in the structured JSON logs:
+### Expected Behavior Under Load
+Under 100 concurrent users, Service C's 3-connection database pool exhausts. You will observe:
+1. `Service C` emitting JSON logs with `"event": "db_pool_exhausted"`.
+2. `Service A` and `Service B` logging downstream HTTP timeout/failure errors.
+3. `Anomaly Detector` catching error spikes over sliding 60s windows and writing entries to `anomaly_alerts`.
+4. Grafana displaying error spikes and streaming correlated log flow.
 
-```powershell
-docker compose logs service-c | findstr "db_pool_exhausted"
+---
+
+## 🔍 Failure Tracing Walkthrough
+
+1. Open **Grafana** at [http://127.0.0.1:30300](http://127.0.0.1:30300).
+2. Enter a failed request ID (e.g. `demo-timeout-001` or a `loadtest-` ID) into the **Request ID Filter** text box.
+3. View the correlated logs across `service-a`, `service-b`, and `service-c` in sequential order.
+4. Expand any log entry and click **View Trace in Jaeger** (or **TraceID**).
+5. Grafana jumps directly into the matching Jaeger distributed trace, rendering the 4-tier span waterfall: `service-a` -> `service-b` -> `service-c` -> `asyncpg query`.
+
+---
+
+## 📁 Repository Structure
+
+```text
+.
+├── common/                     # Shared telemetry & database libraries
+│   ├── database.py             # asyncpg connection pool & SQL queries
+│   ├── logging.py              # Python JSON log formatter with trace context
+│   └── tracing.py              # OpenTelemetry OTLP setup
+├── services/                   # Microservice applications
+│   ├── service_a/              # API Gateway (Port 8000)
+│   ├── service_b/              # Orchestrator (Port 8001)
+│   ├── service_c/              # Data Access & DB Pool (Port 8002)
+│   └── anomaly_detector/       # Kafka Stream Consumer & Anomaly Alerting
+├── k8s/                        # Kubernetes Manifests (Kustomize)
+│   ├── kafka/                  # Kafka broker manifest (KRaft mode)
+│   ├── logging/                # Fluent Bit, Loki, & Grafana manifests
+│   ├── postgres/               # PostgreSQL DB deployment & secrets
+│   ├── services/               # Microservice deployments & services
+│   ├── tracing/                # Jaeger tracing deployment
+│   ├── kustomization.yaml      # Master Kustomize file
+│   └── deploy.ps1              # K8s build & deployment script
+├── loadtest/                   # Load testing tools
+│   ├── locustfile.py           # Locust test script with scenario mixing
+│   └── full_pipeline_test.ps1  # Automated load test execution script
+├── docs/                       # Project Documentation & Interview Artifacts
+│   ├── INTERVIEW_NARRATIVE.md  # Detailed interview storytelling writeup
+│   └── FAILURE_TRACE_RUNBOOK.md# Step-by-step incident investigation guide
+├── compose.yaml                # Docker Compose multi-container setup
+├── requirements.txt            # Python dependencies
+└── README.md                   # Project documentation
 ```
 
-You should see multiple JSON log lines with `"event": "db_pool_exhausted"` — real database failures with full request correlation, before Kafka/Loki/Jaeger exist.
+---
 
-### Configuration
+## 📚 Interview Story & Runbook
 
-| Variable                     | Service | Default | Purpose                               |
-|------------------------------|---------|---------|---------------------------------------|
-| `DATABASE_URL`               | C / AD  | -       | Postgres connection string            |
-| `DB_POOL_SIZE`               | C       | `3`     | Max pool connections (keep low!)      |
-| `DB_POOL_ACQUIRE_TIMEOUT`    | C       | `2.0`   | Seconds to wait for a pool slot       |
-| `SERVICE_C_TIMEOUT_SECONDS`  | B       | `0.5`   | B's timeout calling C                 |
-| `SERVICE_B_TIMEOUT_SECONDS`  | A       | `3`     | A's timeout calling B                 |
-| `KAFKA_BOOTSTRAP_SERVERS`    | AD      | `localhost:9092` | Kafka broker endpoint               |
-| `ANOMALY_WINDOW_SEC`         | AD      | `60`    | Sliding window size for rate evaluation |
-| `ANOMALY_THRESHOLD`          | AD      | `5`     | Min errors in window to trigger alert |
-| `OTEL_EXPORTER_OTLP_ENDPOINT`| A / B / C| `http://jaeger:4317` | OTLP gRPC export endpoint for Jaeger |
-
-## Step 6: OpenTelemetry + Jaeger (Distributed Tracing)
-
-Each FastAPI service (`service-a`, `service-b`, `service-c`) is auto-instrumented with OpenTelemetry to generate distributed traces across HTTP calls and database queries. Structured logs in stdout include `trace_id` and `span_id` for correlation.
-
-### Access Jaeger UI
-
-- **Docker Compose**: Open [http://127.0.0.1:16686](http://127.0.0.1:16686)
-- **Kubernetes**: Open [http://127.0.0.1:31686](http://127.0.0.1:31686) (or run `kubectl port-forward svc/jaeger 16686:16686`)
-
-### Verify End-to-End Traces
-
-1. Send an HTTP request to Service A:
-   ```powershell
-   curl.exe http://127.0.0.1:8000/api/orders/42
-   ```
-2. Open Jaeger UI at `http://127.0.0.1:16686`.
-3. Select `service-a` under **Service** and click **Find Traces**.
-4. Click on the trace to inspect the complete call chain: `service-a` -> `service-b` -> `service-c` -> `asyncpg` SQL query.
-
-## Step 7: Grafana Dashboard (The Single Screen Demo)
-
-Grafana comes pre-configured with Loki, Jaeger, and PostgreSQL data sources, automatically loading the **Microservice Observability Pipeline** dashboard at startup.
-
-### Access Grafana UI
-
-- **Kubernetes**: Open [http://127.0.0.1:30300](http://127.0.0.1:30300) (Default login: `admin` / `admin`).
-
-### Pipeline Demo & Trace Correlation
-
-1. **Trigger a Request**:
-   ```powershell
-   curl.exe -i -H "X-Request-ID: demo-step7-001" -H "X-Demo-Scenario: slow" http://127.0.0.1:8000/api/orders/42
-   ```
-
-2. **Filter Logs by Request ID**:
-   - Open Grafana at [http://127.0.0.1:30300](http://127.0.0.1:30300).
-   - In the **Request ID Filter** text box at the top, enter `demo-step7-001`.
-   - The unified log stream instantly displays correlated log events in sequence from `service-a`, `service-b`, and `service-c`.
-
-3. **Navigate from Log to Jaeger Trace**:
-   - Expand any log entry in the **Unified Log Telemetry Stream** panel.
-   - Click the **TraceID** (or **View Trace in Jaeger**) link next to `trace_id`.
-   - Grafana jumps directly into the matching Jaeger distributed trace UI.
-
-4. **Live Telemetry & Anomaly Alerts**:
-   - View real-time log ingestion rate graphs per service.
-   - Monitor database anomaly alerts generated in PostgreSQL by `anomaly-detector`.
-
-## Step 5: Anomaly Detector (Second Kafka Consumer)
-
-
-The `anomaly-detector` service acts as an independent consumer of the `app-logs` Kafka topic (using consumer group `anomaly-detector`). It proves Kafka's fan-out capabilities by evaluating error rate spikes over a sliding 60-second window.
-
-### Query Anomaly Alerts
-
-```powershell
-# View generated alerts in Postgres
-kubectl exec -it deploy/postgres -- psql -U orders -c "SELECT * FROM anomaly_alerts ORDER BY id DESC LIMIT 5;"
-
-# Check anomaly detector logs
-kubectl logs deploy/anomaly-detector --tail=20
-```
-
-## Run Locally (plain Python)
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-```
-
-You'll need a local Postgres running on port 5432 with database/user/password all set to `orders`, or set `DATABASE_URL` accordingly.
-
-Start in four separate terminals:
-
-```powershell
-python -m uvicorn services.service_c.main:app --port 8002
-python -m uvicorn services.service_b.main:app --port 8001
-python -m uvicorn services.service_a.main:app --port 8000
-python -m uvicorn services.anomaly_detector.main:app --port 8003
-```
-
-## Stop
-
-```powershell
-docker compose logs -f service-a service-b service-c anomaly-detector
-docker compose down -v        # -v removes the pgdata volume
-```
+* 📖 **Interview Pitch & Narrative**: Read [`docs/INTERVIEW_NARRATIVE.md`](file:///c:/Users/krish/OneDrive/Desktop/MyProject/docs/INTERVIEW_NARRATIVE.md) for a comprehensive writeup on the problem statement, technical decisions, and STAR-format interview responses.
+* 🛠️ **Failure Tracing Runbook**: Read [`docs/FAILURE_TRACE_RUNBOOK.md`](file:///c:/Users/krish/OneDrive/Desktop/MyProject/docs/FAILURE_TRACE_RUNBOOK.md) for step-by-step instructions on capturing failure traces and dashboard screenshots.
