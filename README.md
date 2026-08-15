@@ -208,8 +208,8 @@ Under 100 concurrent users, Service C's 3-connection database pool exhausts. You
 ├── loadtest/                   # Load testing tools
 │   ├── locustfile.py           # Locust test script with scenario mixing
 │   └── full_pipeline_test.ps1  # Automated load test execution script
-├── docs/                       # Project Documentation & Interview Artifacts
-│   ├── INTERVIEW_NARRATIVE.md  # Detailed interview storytelling writeup
+├── docs/                       # Architecture & operational runbooks
+│   ├── ARCHITECTURE.md         # Comprehensive system design & technical trade-offs
 │   └── FAILURE_TRACE_RUNBOOK.md# Step-by-step incident investigation guide
 ├── compose.yaml                # Docker Compose multi-container setup
 ├── requirements.txt            # Python dependencies
@@ -218,7 +218,7 @@ Under 100 concurrent users, Service C's 3-connection database pool exhausts. You
 
 ---
 
-## 📚 Interview Story & Runbook
+## 📚 Documentation & Runbooks
 
-* 📖 **Interview Pitch & Narrative**: Read [`docs/INTERVIEW_NARRATIVE.md`](file:///c:/Users/krish/OneDrive/Desktop/MyProject/docs/INTERVIEW_NARRATIVE.md) for a comprehensive writeup on the problem statement, technical decisions, and STAR-format interview responses.
-* 🛠️ **Failure Tracing Runbook**: Read [`docs/FAILURE_TRACE_RUNBOOK.md`](file:///c:/Users/krish/OneDrive/Desktop/MyProject/docs/FAILURE_TRACE_RUNBOOK.md) for step-by-step instructions on capturing failure traces and dashboard screenshots.
+* 📖 **Architecture & System Design**: Read [`docs/ARCHITECTURE.md`](file:///c:/Users/krish/OneDrive/Desktop/MyProject/docs/ARCHITECTURE.md) for a comprehensive writeup on the problem statement, technical decisions, and component trade-offs.
+* 🛠️ **Failure Tracing Runbook**: Read [`docs/FAILURE_TRACE_RUNBOOK.md`](file:///c:/Users/krish/OneDrive/Desktop/MyProject/docs/FAILURE_TRACE_RUNBOOK.md) for step-by-step instructions on diagnosing incidents, examining correlated logs, and inspecting Jaeger traces.

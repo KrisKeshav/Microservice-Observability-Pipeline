@@ -91,12 +91,12 @@ curl.exe -i -H "X-Request-ID: loadtest-fail-demo-001" -H "X-Demo-Scenario: slow"
 
 ---
 
-## Step 5: Capture Artifact Screenshot / Clip for Interviews
+## Step 5: Incident Resolution & Telemetry Verification
 
-For your portfolio or interview presentation, capture a clean screenshot showing:
+Verify that all signals across the observability stack reflect the incident state:
 
-1. **Top half**: Grafana Dashboard showing the log rate spike and `anomaly_alerts` table entries.
-2. **Bottom left**: Unified Log Stream filtered by `request_id`, highlighting `service-c` `db_pool_exhausted`.
-3. **Bottom right / Overlay**: Jaeger trace graph showing the 4-tier span hierarchy (`service-a` -> `service-b` -> `service-c` -> `asyncpg`).
+1. **Log Rate & Alerts**: Grafana Dashboard displays the log rate spike and `anomaly_alerts` table entries.
+2. **Correlated Logs**: Unified Log Stream filtered by `request_id` highlights `service-c` `db_pool_exhausted`.
+3. **Trace Waterfall**: Jaeger trace graph shows the 4-tier span hierarchy (`service-a` -> `service-b` -> `service-c` -> `asyncpg`).
 
-This visual demonstrates full-stack observability mastery: **Client HTTP error -> Container stdout -> Kafka -> Loki -> Anomaly Detector -> Jaeger trace correlation**.
+This confirms end-to-end telemetry propagation: **Client HTTP error -> Container stdout -> Kafka -> Loki -> Anomaly Detector -> Jaeger trace correlation**.

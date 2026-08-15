@@ -2,4 +2,6 @@
 __pycache__/
 *.py[cod]
 *.log
-INTERVIEW_NARRATIVE.md
+.pytest_cache/
+.coverage
+htmlcov/
