@@ -1,8 +1,8 @@
 import logging
 import sys
 
-from pythonjsonlogger.json import JsonFormatter
 from opentelemetry import trace
+from pythonjsonlogger.json import JsonFormatter
 
 
 def get_logger(service: str) -> logging.Logger:

@@ -1,7 +1,6 @@
 """Async Postgres pool — deliberately tiny so pool exhaustion is easy to trigger."""
 
 import os
-from datetime import datetime, timezone
 
 import asyncpg
 

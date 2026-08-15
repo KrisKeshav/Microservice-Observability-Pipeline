@@ -22,13 +22,23 @@ spec:
             - containerPort: 8000
           env:
             - name: DATABASE_URL
-              value: "postgresql://orders:orders@postgres:5432/orders"
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: DATABASE_URL
             - name: DB_POOL_SIZE
               value: "3"
             - name: DB_POOL_ACQUIRE_TIMEOUT
               value: "0.5"
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "http://jaeger:4317"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
 
           readinessProbe:
             httpGet:

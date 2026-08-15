@@ -1,12 +1,11 @@
 import asyncio
-import os
 
 import asyncpg
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
-from common.logging import get_logger, log_event, log_error
-from common.database import init_db, close_db, get_order, get_order_slow, create_order
+from common.database import close_db, create_order, get_order, get_order_slow, init_db
+from common.logging import get_logger, log_error, log_event
 from common.tracing import setup_telemetry
 
 app = FastAPI(title="Service C")

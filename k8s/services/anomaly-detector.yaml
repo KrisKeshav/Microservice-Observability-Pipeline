@@ -22,13 +22,23 @@ spec:
             - containerPort: 8000
           env:
             - name: DATABASE_URL
-              value: "postgresql://orders:orders@postgres:5432/orders"
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: DATABASE_URL
             - name: KAFKA_BOOTSTRAP_SERVERS
               value: "kafka:9092"
             - name: ANOMALY_WINDOW_SEC
               value: "60"
             - name: ANOMALY_THRESHOLD
               value: "5"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
           readinessProbe:
             httpGet:
               path: /health

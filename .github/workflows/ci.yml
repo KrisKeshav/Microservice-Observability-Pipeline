@@ -1,0 +1,177 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  lint:
+    name: Lint & Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff yamllint
+
+      - name: Run Ruff Linter
+        run: ruff check .
+
+      - name: Validate Kubernetes Manifests
+        run: |
+          yamllint -d "{extends: relaxed, rules: {line-length: {max: 180}}}" k8s/
+
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run Tests with Pytest
+        env:
+          OTEL_SDK_DISABLED: "true"
+        run: pytest -v
+
+  build:
+    name: Build Images
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - service: service-a
+            context: .
+            dockerfile: services/service_a/Dockerfile
+          - service: service-b
+            context: .
+            dockerfile: services/service_b/Dockerfile
+          - service: service-c
+            context: .
+            dockerfile: services/service_c/Dockerfile
+          - service: anomaly-detector
+            context: .
+            dockerfile: services/anomaly_detector/Dockerfile
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          load: true
+          tags: ${{ matrix.service }}:${{ github.sha }}
+
+      - name: Save Docker image artifact for scanning
+        run: |
+          docker save ${{ matrix.service }}:${{ github.sha }} -o /tmp/${{ matrix.service }}.tar
+
+      - name: Upload image tar
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.service }}-image
+          path: /tmp/${{ matrix.service }}.tar
+
+  scan:
+    name: Security Scan (Trivy)
+    runs-on: ubuntu-latest
+    needs: build
+    strategy:
+      matrix:
+        service: [service-a, service-b, service-c, anomaly-detector]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download image tar
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.service }}-image
+          path: /tmp
+
+      - name: Load Docker image
+        run: docker load -i /tmp/${{ matrix.service }}.tar
+
+      - name: Run Trivy Vulnerability Scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ matrix.service }}:${{ github.sha }}
+          format: "table"
+          exit-code: "0"
+          ignore-unfixed: true
+          vuln-type: "os,library"
+          severity: "CRITICAL,HIGH"
+
+  push:
+    name: Push Images to GHCR
+    runs-on: ubuntu-latest
+    needs: scan
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    strategy:
+      matrix:
+        include:
+          - service: service-a
+            context: .
+            dockerfile: services/service_a/Dockerfile
+          - service: service-b
+            context: .
+            dockerfile: services/service_b/Dockerfile
+          - service: service-c
+            context: .
+            dockerfile: services/service_c/Dockerfile
+          - service: anomaly-detector
+            context: .
+            dockerfile: services/anomaly_detector/Dockerfile
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/${{ matrix.service }}:${{ github.sha }}
+            ghcr.io/${{ github.repository }}/${{ matrix.service }}:latest

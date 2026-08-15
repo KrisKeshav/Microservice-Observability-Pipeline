@@ -3,14 +3,13 @@ import json
 import os
 import time
 from collections import deque
-from datetime import datetime, timezone
 
 import asyncpg
 from confluent_kafka import Consumer, KafkaError
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from common.logging import get_logger, log_event, log_error
+from common.logging import get_logger, log_error
 
 app = FastAPI(title="Anomaly Detector Service")
 logger = get_logger("anomaly-detector")
