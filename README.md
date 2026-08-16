@@ -173,46 +173,38 @@ Prometheus also scrapes the observability infrastructure itself:
 
 Alerts fire through **Alertmanager** → **Slack** via the `SLACK_WEBHOOK_URL` secret.
 
-### Synthetic Canary
-
-A Kubernetes CronJob (`synthetic-canary`) sends a test request to Service A every 5 minutes. This creates end-to-end telemetry that the canary watchdog can verify.
-
 ---
 
-## 🐕 Canary Watchdog (Local Setup)
+## 🐕 On-Demand Canary Watchdog & End-to-End Demo Flow
 
-The canary watchdog (`scripts/canary_watchdog.py`) verifies that synthetic canary logs appear in Loki and traces appear in Jaeger. If either is missing, it sends a Slack alert.
+The repository includes an on-demand canary watchdog script ([`scripts/canary_watchdog.py`](file:///c:/Users/krish/OneDrive/Desktop/MyProject/scripts/canary_watchdog.py)) that queries Loki and Jaeger to verify that end-to-end logs and traces are flowing cleanly.
 
-**Why it's not in CI:** The local cluster (Minikube/Docker Desktop) is unreachable from GitHub Actions runners. The `.github/workflows/canary-watchdog.yml` file is a documented stub for future use with a public cluster (EKS/GKE/AKS).
+> [!NOTE]
+> Always-on scheduling was intentionally descoped for this local development environment, as running an unattended background task on a personal machine introduces unnecessary false alarms and OS-level debugging overhead; in a production deployment, this would run as a lightweight external cron, sidecar, or uptime-check service rather than an OS-level scheduled task.
 
-### Automated Setup (Windows Task Scheduler)
+### Running the Watchdog On-Demand
 
 ```powershell
-# Run from an elevated PowerShell prompt
-.\scripts\register-canary-task.ps1
+.venv\Scripts\python.exe .\scripts\canary_watchdog.py
 ```
 
-This registers a scheduled task that runs the watchdog every 5 minutes.
+The script performs a reachability precheck first, queries Loki for recent logs, queries Jaeger for recent traces, and emits a Slack notification if pipeline degradation is detected.
 
-### Manual Setup
+### Recommended Demo Flow (Detect → Alert → Trace)
 
-1. Open **Task Scheduler** (`taskschd.msc`)
-2. **Create Basic Task** → Name: `CanaryWatchdog`
-3. **Trigger**: Daily, repeat every 5 minutes
-4. **Action**: Start a program
-   - Program: `.venv\Scripts\python.exe`
-   - Arguments: `scripts\canary_watchdog.py`
-   - Start in: `C:\Users\krish\OneDrive\Desktop\MyProject`
-5. Verify: `Get-ScheduledTask -TaskName CanaryWatchdog`
+To demonstrate the full observability and alerting lifecycle in action:
 
-### Environment Variables
-
-| Variable | Default | Description |
-| :--- | :--- | :--- |
-| `LOKI_URL` | `http://localhost:30100` | Loki query endpoint |
-| `JAEGER_URL` | `http://localhost:31686` | Jaeger query endpoint |
-| `SLACK_WEBHOOK_URL` | *(empty)* | Slack incoming webhook for alerts |
-| `LOOKBACK_MINUTES` | `5` | How far back to look for canary events |
+1. **Trigger Load & Faults**: Run the automated Locust load test against the cluster:
+   ```powershell
+   .\loadtest\full_pipeline_test.ps1
+   ```
+2. **Observe Real-Time RED Metrics**: Open Grafana at [http://127.0.0.1:30300](http://127.0.0.1:30300) and watch the RED method panels spike as Service C's 3-connection database pool exhausts (`db_pool_active >= db_pool_max`).
+3. **Confirm Alertmanager & Slack Notification**: Check Alertmanager at [http://127.0.0.1:30093](http://127.0.0.1:30093) to see `DBPoolExhausted` and `HighErrorRate` alerts trigger and dispatch notifications to Slack.
+4. **Inspect Correlated Trace in Jaeger**: From the unified log stream in Grafana, click the `TraceID` link on any failed log line to navigate directly to the Jaeger waterfall trace ([http://127.0.0.1:31686](http://127.0.0.1:31686)) and isolate the root-cause database query timeout.
+5. **Verify Telemetry Pipeline**: Run the watchdog script to validate end-to-end telemetry ingestion:
+   ```powershell
+   .venv\Scripts\python.exe .\scripts\canary_watchdog.py
+   ```
 
 ---
 
@@ -284,12 +276,11 @@ Under 100 concurrent users, Service C's 3-connection database pool exhausts. You
 │   ├── service_c/              # Data Access & DB Pool (Port 8002)
 │   └── anomaly_detector/       # Kafka Stream Consumer & Anomaly Alerting
 ├── scripts/                    # Operational scripts
-│   ├── canary_watchdog.py      # Out-of-band telemetry pipeline verifier
-│   └── register-canary-task.ps1# Windows Task Scheduler setup for watchdog
+│   └── canary_watchdog.py      # On-demand telemetry pipeline verifier
 ├── k8s/                        # Kubernetes Manifests (Kustomize)
 │   ├── kafka/                  # Kafka broker manifest (KRaft mode)
 │   ├── logging/                # Fluent Bit, Loki, & Grafana manifests
-│   ├── monitoring/             # Prometheus, Alertmanager, Kafka Exporter, Canary CronJob
+│   ├── monitoring/             # Prometheus, Alertmanager, Kafka Exporter, Alert Rules
 │   ├── postgres/               # PostgreSQL DB deployment & secrets
 │   ├── secrets/                # Secret management (Sealed Secrets / External Secrets)
 │   ├── services/               # Microservice deployments & services
@@ -303,8 +294,7 @@ Under 100 concurrent users, Service C's 3-connection database pool exhausts. You
 │   ├── ARCHITECTURE.md         # Comprehensive system design & technical trade-offs
 │   └── FAILURE_TRACE_RUNBOOK.md# Step-by-step incident investigation guide
 ├── .github/workflows/          # CI/CD pipelines
-│   ├── ci.yml                  # Lint → Test → Build → Scan → Push
-│   └── canary-watchdog.yml     # Stub (disabled) — requires public cluster
+│   └── ci.yml                  # Lint → Test → Build → Scan → Push
 ├── compose.yaml                # Docker Compose multi-container setup
 ├── requirements.txt            # Python dependencies
 └── README.md                   # Project documentation
