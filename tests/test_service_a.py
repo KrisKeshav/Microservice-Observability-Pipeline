@@ -40,3 +40,9 @@ def test_service_a_create_order_success():
         data = response.json()
         assert data["service"] == "a"
         assert data["order"]["service"] == "b"
+
+
+def test_service_a_metrics():
+    response = client.get("/metrics")
+    assert response.status_code == 200
+    assert "http_requests_total" in response.text

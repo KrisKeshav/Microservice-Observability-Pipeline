@@ -2,15 +2,30 @@ import asyncio
 
 import asyncpg
 from fastapi import FastAPI, Header, HTTPException
+from prometheus_client import Gauge
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 
-from common.database import close_db, create_order, get_order, get_order_slow, init_db
+from common.database import (
+    close_db,
+    create_order,
+    get_order,
+    get_order_slow,
+    get_pool_metrics,
+    init_db,
+)
 from common.logging import get_logger, log_error, log_event
 from common.tracing import setup_telemetry
 
 app = FastAPI(title="Service C")
 setup_telemetry(app, "service-c")
+Instrumentator().instrument(app).expose(app)
 logger = get_logger("service-c")
+
+db_pool_active = Gauge("db_pool_active", "Active database connections in the pool")
+db_pool_max = Gauge("db_pool_max", "Max database connections configured for pool")
+db_pool_active.set_function(lambda: get_pool_metrics()[0])
+db_pool_max.set_function(lambda: get_pool_metrics()[1])
 
 
 

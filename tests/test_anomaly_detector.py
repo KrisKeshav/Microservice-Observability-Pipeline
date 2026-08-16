@@ -51,3 +51,22 @@ def test_anomaly_detector_alerts_success():
     alerts = response.json()
     assert len(alerts) == 1
     assert alerts[0]["error_count"] == 5
+
+
+def test_anomaly_detector_metrics():
+    response = client.get("/metrics")
+    assert response.status_code == 200
+    assert "http_requests_total" in response.text
+
+
+def test_send_alertmanager_alert():
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    import httpx
+
+    mock_resp = httpx.Response(200, json={}, request=httpx.Request("POST", "http://test"))
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        asyncio.run(ad_module.send_alertmanager_alert(5, 10, 0.5, {"threshold": 5}))
+        assert mock_post.called

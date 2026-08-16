@@ -1,0 +1,134 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: default
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 5s
+      evaluation_interval: 5s
+
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets: ['alertmanager:9093']
+
+    rule_files:
+      - /etc/prometheus/rules/*.yml
+
+    scrape_configs:
+      - job_name: 'service-a'
+        static_configs:
+          - targets: ['service-a:8000']
+
+      - job_name: 'service-b'
+        static_configs:
+          - targets: ['service-b:8000']
+
+      - job_name: 'service-c'
+        static_configs:
+          - targets: ['service-c:8000']
+
+      - job_name: 'anomaly-detector'
+        static_configs:
+          - targets: ['anomaly-detector:8000']
+
+      - job_name: 'kafka-exporter'
+        static_configs:
+          - targets: ['kafka-exporter:9308']
+
+      - job_name: 'loki'
+        static_configs:
+          - targets: ['loki:3100']
+
+      - job_name: 'jaeger'
+        static_configs:
+          - targets: ['jaeger:14269']
+
+      - job_name: 'fluent-bit-shipper'
+        metrics_path: /api/v1/metrics/prometheus
+        static_configs:
+          - targets: ['fluent-bit-shipper:2020']
+
+      - job_name: 'fluent-bit-consumer'
+        metrics_path: /api/v1/metrics/prometheus
+        static_configs:
+          - targets: ['fluent-bit-consumer:2020']
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: default
+  labels:
+    app: prometheus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      containers:
+        - name: prometheus
+          image: prom/prometheus:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--config.file=/etc/prometheus/prometheus.yml"
+            - "--storage.tsdb.path=/prometheus"
+            - "--web.enable-lifecycle"
+          ports:
+            - containerPort: 9090
+              name: http
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9090
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+            - name: rules
+              mountPath: /etc/prometheus/rules
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+        - name: rules
+          configMap:
+            name: prometheus-alert-rules
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: default
+  labels:
+    app: prometheus
+spec:
+  type: NodePort
+  selector:
+    app: prometheus
+  ports:
+    - name: http
+      port: 9090
+      targetPort: 9090
+      nodePort: 30090

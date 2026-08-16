@@ -2,6 +2,7 @@ import os
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 
 from common.logging import get_logger, log_event
@@ -9,6 +10,7 @@ from common.tracing import setup_telemetry
 
 app = FastAPI(title="Service B")
 setup_telemetry(app, "service-b")
+Instrumentator().instrument(app).expose(app)
 logger = get_logger("service-b")
 SERVICE_C_URL = os.getenv("SERVICE_C_URL", "http://127.0.0.1:8002")
 SERVICE_C_TIMEOUT_SECONDS = float(os.getenv("SERVICE_C_TIMEOUT_SECONDS", "0.5"))

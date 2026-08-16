@@ -5,16 +5,20 @@ import time
 from collections import deque
 
 import asyncpg
+import httpx
 from confluent_kafka import Consumer, KafkaError
 from fastapi import FastAPI, HTTPException
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 
 from common.logging import get_logger, log_error
 
 app = FastAPI(title="Anomaly Detector Service")
+Instrumentator().instrument(app).expose(app)
 logger = get_logger("anomaly-detector")
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://orders:orders@localhost:5432/orders")
+ALERTMANAGER_URL = os.getenv("ALERTMANAGER_URL", "http://alertmanager:9093")
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "app-logs")
 KAFKA_GROUP_ID = os.getenv("KAFKA_GROUP_ID", "anomaly-detector")
@@ -152,6 +156,32 @@ async def evaluator_loop():
                         )
                 except Exception as exc:
                     logger.error(f"Failed to record anomaly alert in DB: {exc}")
+
+            await send_alertmanager_alert(error_count, total_count, error_rate, details)
+
+
+async def send_alertmanager_alert(error_count: int, total_count: int, error_rate: float, details: dict) -> None:
+    if not ALERTMANAGER_URL:
+        return
+    payload = [
+        {
+            "labels": {
+                "alertname": "AnomalyErrorSpike",
+                "severity": "critical",
+                "service": "anomaly-detector",
+            },
+            "annotations": {
+                "summary": "Log anomaly detected: high error rate",
+                "description": f"Detected {error_count} errors out of {total_count} logs ({error_rate * 100:.1f}%) in {ANOMALY_WINDOW_SEC}s window.",
+            },
+        }
+    ]
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.post(f"{ALERTMANAGER_URL}/api/v2/alerts", json=payload)
+            resp.raise_for_status()
+    except Exception as exc:
+        logger.warning(f"Failed to forward alert to Alertmanager: {exc}")
 
 
 @app.on_event("startup")

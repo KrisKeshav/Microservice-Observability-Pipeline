@@ -32,6 +32,8 @@ spec:
               value: "60"
             - name: ANOMALY_THRESHOLD
               value: "5"
+            - name: ALERTMANAGER_URL
+              value: "http://alertmanager:9093"
           resources:
             requests:
               cpu: 100m

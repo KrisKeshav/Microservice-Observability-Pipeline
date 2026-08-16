@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-exporter
+  namespace: default
+  labels:
+    app: kafka-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka-exporter
+  template:
+    metadata:
+      labels:
+        app: kafka-exporter
+    spec:
+      containers:
+        - name: kafka-exporter
+          image: danielqsj/kafka-exporter:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--kafka.server=kafka:9092"
+          ports:
+            - containerPort: 9308
+              name: metrics
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 150m
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 9308
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 9308
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-exporter
+  namespace: default
+  labels:
+    app: kafka-exporter
+spec:
+  type: ClusterIP
+  selector:
+    app: kafka-exporter
+  ports:
+    - name: metrics
+      port: 9308
+      targetPort: 9308

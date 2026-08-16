@@ -39,3 +39,9 @@ def test_service_b_create_order_success():
         response = client.post("/internal/orders", json={"order_id": "ord-10"}, headers={"X-Request-ID": "req-b-3"})
         assert response.status_code == 200
         assert response.json()["service"] == "b"
+
+
+def test_service_b_metrics():
+    response = client.get("/metrics")
+    assert response.status_code == 200
+    assert "http_requests_total" in response.text

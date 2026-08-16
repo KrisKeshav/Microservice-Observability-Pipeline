@@ -118,6 +118,8 @@ Access endpoints:
 * **Service A (API Gateway)**: `http://127.0.0.1:30080` (or `kubectl port-forward svc/service-a 8000:8000`)
 * **Grafana Dashboard**: [http://127.0.0.1:30300](http://127.0.0.1:30300) (User: `admin` / Password: `admin`)
 * **Jaeger UI**: [http://127.0.0.1:31686](http://127.0.0.1:31686)
+* **Prometheus**: `http://127.0.0.1:30090` (or `kubectl port-forward svc/prometheus 9090:9090`)
+* **Alertmanager**: `http://127.0.0.1:30093` (or `kubectl port-forward svc/alertmanager 9093:9093`)
 
 ### Option B: Deploy with Docker Compose
 
@@ -128,6 +130,89 @@ docker compose up --build -d
 # Check health status
 docker compose ps
 ```
+
+> **Note:** Docker Compose does not yet have metrics/alerting support. Use Kubernetes for the full Sprint 2 experience.
+
+---
+
+## 📊 Monitoring, Metrics & Alerting (Sprint 2)
+
+### Prometheus Metrics
+
+All services expose `/metrics` endpoints instrumented with `prometheus-fastapi-instrumentator`:
+
+| Metric | Type | Description |
+| :--- | :--- | :--- |
+| `http_requests_total` | Counter | Total requests by service, method, status |
+| `http_request_duration_seconds` | Histogram | Request latency distribution (p50/p95/p99) |
+| `db_pool_active` | Gauge | Service C active DB connections |
+| `db_pool_max` | Gauge | Service C max pool capacity |
+
+### RED Dashboards
+
+The Grafana dashboard includes per-service RED panels:
+- **Rate**: `sum by (service) (rate(http_requests_total[1m]))`
+- **Errors**: `sum by (service) (rate(http_requests_total{status=~"5.."}[1m]))`
+- **Duration**: `histogram_quantile(0.95, ...)` p95 latency
+
+### Meta-Monitoring
+
+Prometheus also scrapes the observability infrastructure itself:
+- **Kafka Exporter**: Consumer group lag for `loki-consumer` and `anomaly-detector`
+- **Fluent Bit**: Buffer/retry rates for shipper and consumer
+- **Loki**: `/metrics` endpoint on port 3100
+- **Jaeger**: Admin metrics on port 14269
+
+### Alert Rules
+
+| Alert | Condition | Severity |
+| :--- | :--- | :--- |
+| `HighErrorRate` | >10% 5xx rate for 2 minutes | critical |
+| `DBPoolExhausted` | `db_pool_active >= db_pool_max` for 1 minute | critical |
+| `KafkaConsumerLagHigh` | Consumer lag >1000 for 5 minutes | warning |
+
+Alerts fire through **Alertmanager** → **Slack** via the `SLACK_WEBHOOK_URL` secret.
+
+### Synthetic Canary
+
+A Kubernetes CronJob (`synthetic-canary`) sends a test request to Service A every 5 minutes. This creates end-to-end telemetry that the canary watchdog can verify.
+
+---
+
+## 🐕 Canary Watchdog (Local Setup)
+
+The canary watchdog (`scripts/canary_watchdog.py`) verifies that synthetic canary logs appear in Loki and traces appear in Jaeger. If either is missing, it sends a Slack alert.
+
+**Why it's not in CI:** The local cluster (Minikube/Docker Desktop) is unreachable from GitHub Actions runners. The `.github/workflows/canary-watchdog.yml` file is a documented stub for future use with a public cluster (EKS/GKE/AKS).
+
+### Automated Setup (Windows Task Scheduler)
+
+```powershell
+# Run from an elevated PowerShell prompt
+.\scripts\register-canary-task.ps1
+```
+
+This registers a scheduled task that runs the watchdog every 5 minutes.
+
+### Manual Setup
+
+1. Open **Task Scheduler** (`taskschd.msc`)
+2. **Create Basic Task** → Name: `CanaryWatchdog`
+3. **Trigger**: Daily, repeat every 5 minutes
+4. **Action**: Start a program
+   - Program: `.venv\Scripts\python.exe`
+   - Arguments: `scripts\canary_watchdog.py`
+   - Start in: `C:\Users\krish\OneDrive\Desktop\MyProject`
+5. Verify: `Get-ScheduledTask -TaskName CanaryWatchdog`
+
+### Environment Variables
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `LOKI_URL` | `http://localhost:30100` | Loki query endpoint |
+| `JAEGER_URL` | `http://localhost:31686` | Jaeger query endpoint |
+| `SLACK_WEBHOOK_URL` | *(empty)* | Slack incoming webhook for alerts |
+| `LOOKBACK_MINUTES` | `5` | How far back to look for canary events |
 
 ---
 
@@ -170,7 +255,8 @@ Under 100 concurrent users, Service C's 3-connection database pool exhausts. You
 1. `Service C` emitting JSON logs with `"event": "db_pool_exhausted"`.
 2. `Service A` and `Service B` logging downstream HTTP timeout/failure errors.
 3. `Anomaly Detector` catching error spikes over sliding 60s windows and writing entries to `anomaly_alerts`.
-4. Grafana displaying error spikes and streaming correlated log flow.
+4. **Alertmanager** firing `HighErrorRate` and `DBPoolExhausted` alerts → Slack notifications.
+5. Grafana displaying error spikes, DB pool saturation, and Kafka consumer lag.
 
 ---
 
@@ -189,7 +275,7 @@ Under 100 concurrent users, Service C's 3-connection database pool exhausts. You
 ```text
 .
 ├── common/                     # Shared telemetry & database libraries
-│   ├── database.py             # asyncpg connection pool & SQL queries
+│   ├── database.py             # asyncpg connection pool, SQL queries & pool metrics
 │   ├── logging.py              # Python JSON log formatter with trace context
 │   └── tracing.py              # OpenTelemetry OTLP setup
 ├── services/                   # Microservice applications
@@ -197,10 +283,15 @@ Under 100 concurrent users, Service C's 3-connection database pool exhausts. You
 │   ├── service_b/              # Orchestrator (Port 8001)
 │   ├── service_c/              # Data Access & DB Pool (Port 8002)
 │   └── anomaly_detector/       # Kafka Stream Consumer & Anomaly Alerting
+├── scripts/                    # Operational scripts
+│   ├── canary_watchdog.py      # Out-of-band telemetry pipeline verifier
+│   └── register-canary-task.ps1# Windows Task Scheduler setup for watchdog
 ├── k8s/                        # Kubernetes Manifests (Kustomize)
 │   ├── kafka/                  # Kafka broker manifest (KRaft mode)
 │   ├── logging/                # Fluent Bit, Loki, & Grafana manifests
+│   ├── monitoring/             # Prometheus, Alertmanager, Kafka Exporter, Canary CronJob
 │   ├── postgres/               # PostgreSQL DB deployment & secrets
+│   ├── secrets/                # Secret management (Sealed Secrets / External Secrets)
 │   ├── services/               # Microservice deployments & services
 │   ├── tracing/                # Jaeger tracing deployment
 │   ├── kustomization.yaml      # Master Kustomize file
@@ -211,6 +302,9 @@ Under 100 concurrent users, Service C's 3-connection database pool exhausts. You
 ├── docs/                       # Architecture & operational runbooks
 │   ├── ARCHITECTURE.md         # Comprehensive system design & technical trade-offs
 │   └── FAILURE_TRACE_RUNBOOK.md# Step-by-step incident investigation guide
+├── .github/workflows/          # CI/CD pipelines
+│   ├── ci.yml                  # Lint → Test → Build → Scan → Push
+│   └── canary-watchdog.yml     # Stub (disabled) — requires public cluster
 ├── compose.yaml                # Docker Compose multi-container setup
 ├── requirements.txt            # Python dependencies
 └── README.md                   # Project documentation
@@ -220,5 +314,6 @@ Under 100 concurrent users, Service C's 3-connection database pool exhausts. You
 
 ## 📚 Documentation & Runbooks
 
-* 📖 **Architecture & System Design**: Read [`docs/ARCHITECTURE.md`](file:///c:/Users/krish/OneDrive/Desktop/MyProject/docs/ARCHITECTURE.md) for a comprehensive writeup on the problem statement, technical decisions, and component trade-offs.
-* 🛠️ **Failure Tracing Runbook**: Read [`docs/FAILURE_TRACE_RUNBOOK.md`](file:///c:/Users/krish/OneDrive/Desktop/MyProject/docs/FAILURE_TRACE_RUNBOOK.md) for step-by-step instructions on diagnosing incidents, examining correlated logs, and inspecting Jaeger traces.
+* 📖 **Architecture & System Design**: Read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for a comprehensive writeup on the problem statement, technical decisions, and component trade-offs.
+* 🛠️ **Failure Tracing Runbook**: Read [`docs/FAILURE_TRACE_RUNBOOK.md`](docs/FAILURE_TRACE_RUNBOOK.md) for step-by-step instructions on diagnosing incidents, examining correlated logs, and inspecting Jaeger traces.
+

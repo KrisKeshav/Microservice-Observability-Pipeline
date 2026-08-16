@@ -30,3 +30,10 @@ def test_log_error(capsys):
     data = json.loads(captured.out.strip().splitlines()[-1])
     assert data["event"] == "db_error"
     assert data["error"] == "connection refused"
+
+
+def test_get_pool_metrics():
+    from common.database import get_pool_metrics
+    active, max_size = get_pool_metrics()
+    assert active == 0
+    assert max_size >= 1

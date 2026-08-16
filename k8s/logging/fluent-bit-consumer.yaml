@@ -78,3 +78,19 @@ spec:
         - name: config
           configMap:
             name: fluent-bit-consumer-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fluent-bit-consumer
+  namespace: default
+  labels:
+    app: fluent-bit-consumer
+spec:
+  type: ClusterIP
+  selector:
+    app: fluent-bit-consumer
+  ports:
+    - name: metrics
+      port: 2020
+      targetPort: 2020

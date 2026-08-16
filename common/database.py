@@ -35,6 +35,13 @@ async def close_db() -> None:
         _pool = None
 
 
+def get_pool_metrics() -> tuple[int, int]:
+    if not _pool:
+        return 0, DB_POOL_SIZE
+    active = _pool.get_size() - _pool.get_idle_size()
+    return max(0, active), _pool.get_max_size()
+
+
 async def get_order(order_id: str) -> dict | None:
     async with _pool.acquire(timeout=DB_POOL_ACQUIRE_TIMEOUT) as conn:
         # pg_sleep holds the connection long enough to cause real pool contention

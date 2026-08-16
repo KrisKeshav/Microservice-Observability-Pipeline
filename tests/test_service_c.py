@@ -45,3 +45,10 @@ def test_service_c_create_order_success():
         response = client.post("/internal/orders", json={"order_id": "ord-new"}, headers={"X-Request-ID": "req-c-post"})
         assert response.status_code == 200
         assert response.json()["order"]["id"] == "ord-new"
+
+
+def test_service_c_metrics():
+    response = client.get("/metrics")
+    assert response.status_code == 200
+    assert "db_pool_active" in response.text
+    assert "db_pool_max" in response.text
