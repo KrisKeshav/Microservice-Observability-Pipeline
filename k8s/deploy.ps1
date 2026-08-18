@@ -1,3 +1,7 @@
+param (
+    [string]$Overlay = "dev"
+)
+
 # Build docker images
 docker build -t service-a:latest -f services/service_a/Dockerfile .
 docker build -t service-b:latest -f services/service_b/Dockerfile .
@@ -9,6 +13,7 @@ if (Get-Command minikube -ErrorAction SilentlyContinue) {
     minikube image load service-a:latest service-b:latest service-c:latest anomaly-detector:latest
 }
 
-# Apply Kubernetes manifests
-kubectl apply -k k8s/
-kubectl get pods,svc
+# Apply chosen overlay
+Write-Host "Applying k8s overlay: $Overlay..."
+kubectl apply -k "k8s/overlays/$Overlay"
+kubectl get pods,svc -n $Overlay

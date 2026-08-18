@@ -2,7 +2,6 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: alertmanager-config
-  namespace: default
 data:
   alertmanager.yml: |
     global:
@@ -26,7 +25,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: alertmanager
-  namespace: default
   labels:
     app: alertmanager
 spec:
@@ -89,7 +87,6 @@ apiVersion: v1
 kind: Service
 metadata:
   name: alertmanager
-  namespace: default
   labels:
     app: alertmanager
 spec:

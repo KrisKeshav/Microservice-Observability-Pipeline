@@ -9,6 +9,7 @@ resources:
   - postgres/deployment.yaml
   - postgres/service.yaml
   - services/service-c.yaml
+  - services/service-c-hpa.yaml
   - services/service-b.yaml
   - services/service-a.yaml
   - services/anomaly-detector.yaml
@@ -22,4 +23,3 @@ resources:
   - monitoring/prometheus.yaml
   - monitoring/alertmanager.yaml
   - monitoring/kafka-exporter.yaml
-

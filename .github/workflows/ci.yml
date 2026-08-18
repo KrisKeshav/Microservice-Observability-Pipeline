@@ -33,6 +33,8 @@ jobs:
       - name: Validate Kubernetes Manifests
         run: |
           yamllint -d "{extends: relaxed, rules: {line-length: {max: 180}}}" k8s/
+          kubectl kustomize k8s/overlays/dev > /dev/null
+          kubectl kustomize k8s/overlays/prod > /dev/null
 
   test:
     name: Unit Tests

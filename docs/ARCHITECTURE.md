@@ -97,3 +97,32 @@ flowchart TD
 * **Kafka vs Direct Shipping**: Direct shipping from Fluent Bit to Loki reduces infrastructure overhead. However, placing Kafka in between provides backpressure buffering during traffic spikes, ensuring log producers never drop logs or degrade core application performance.
 * **Loki Label Cardinality**: Loki indexes labels only. High-level metadata (`job`, `service`, `levelname`) are used as labels, while variable fields like `request_id` are parsed at query time using Loki's `| json` filter to avoid high-cardinality index bloat.
 * **Auto-Instrumentation vs Manual Spans**: OpenTelemetry FastAPI and asyncpg auto-instrumentation capture standard HTTP and database spans automatically with zero invasive code modification. Manual spans are added selectively for custom business logic events.
+
+---
+
+## GitOps Architecture & Continuous Delivery (Argo CD)
+
+```mermaid
+flowchart LR
+    GitRepo[("GitHub Repository (main)")]
+    
+    subgraph GitOpsController ["Argo CD Engine"]
+        AppDev["Application: observability-dev"]
+        AppProd["Application: observability-prod"]
+    end
+    
+    subgraph ClusterEnvironments ["Kubernetes Cluster"]
+        DevEnv["Namespace: dev (Single-Replica)"]
+        ProdEnv["Namespace: prod (Multi-Replica + HPA)"]
+    end
+    
+    GitRepo -->|k8s/overlays/dev| AppDev
+    GitRepo -->|k8s/overlays/prod| AppProd
+    AppDev -->|Auto-Sync & Self-Heal| DevEnv
+    AppProd -->|Auto-Sync & Self-Heal| ProdEnv
+```
+
+* **Declarative Source of Truth**: All configurations live under `k8s/base/` and environment overlays (`k8s/overlays/dev/` and `k8s/overlays/prod/`).
+* **Self-Healing & Drift Detection**: Argo CD continuously reconciles cluster state against Git. Any manual tamper or cluster drift is automatically reverted to the Git-declared state.
+* **Auto-Scaling**: Service C scales dynamically based on CPU utilization via Kubernetes `HorizontalPodAutoscaler` (HPA).
+
