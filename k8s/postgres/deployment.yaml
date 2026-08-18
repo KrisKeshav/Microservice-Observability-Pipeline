@@ -35,11 +35,13 @@ spec:
               command: ["pg_isready", "-U", "orders"]
             initialDelaySeconds: 15
             periodSeconds: 10
+            timeoutSeconds: 5
           readinessProbe:
             exec:
               command: ["pg_isready", "-U", "orders"]
             initialDelaySeconds: 5
             periodSeconds: 5
+            timeoutSeconds: 5
           volumeMounts:
             - name: postgres-storage
               mountPath: /var/lib/postgresql/data

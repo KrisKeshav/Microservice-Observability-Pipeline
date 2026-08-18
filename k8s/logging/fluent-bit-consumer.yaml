@@ -11,6 +11,7 @@ data:
         HTTP_Server   On
         HTTP_Listen   0.0.0.0
         HTTP_Port     2020
+        Health_Check  On
 
     [INPUT]
         Name          kafka
