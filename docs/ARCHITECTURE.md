@@ -126,3 +126,43 @@ flowchart LR
 * **Self-Healing & Drift Detection**: Argo CD continuously reconciles cluster state against Git. Any manual tamper or cluster drift is automatically reverted to the Git-declared state.
 * **Auto-Scaling**: Service C scales dynamically based on CPU utilization via Kubernetes `HorizontalPodAutoscaler` (HPA).
 
+---
+
+## Resilience Architecture (Circuit Breaker)
+
+Service B wraps all outbound calls to Service C with an async circuit breaker (`common/circuit_breaker.py`).
+
+```
+State Transitions:
+
+  CLOSED ──(failures >= threshold)──> OPEN ──(recovery_timeout)──> HALF_OPEN
+    ^                                                                  │
+    └────────────(probe succeeds)──────────────────────────────────────┘
+                                                                       │
+                                       OPEN <──(probe fails)───────────┘
+```
+
+| Parameter | Default | Purpose |
+|---|---|---|
+| `failure_threshold` | 3 | Consecutive failures before tripping to OPEN |
+| `recovery_timeout` | 5.0s | Time in OPEN before allowing a probe request |
+| `retries` | 1 | Retry attempts with exponential backoff before counting a failure |
+
+**Behavior under outage:**
+- **Without circuit breaker**: Every request to Service B hangs for 500ms+ waiting for Service C to timeout, consuming connection slots and propagating latency upstream to Service A and the client.
+- **With circuit breaker**: After 3 failures, the circuit trips to OPEN. Subsequent requests are rejected in <5ms with a 503 and `Retry-After` header. No network I/O occurs, no connection slots are consumed.
+
+**Observability integration:**
+- `circuit_breaker_state` Prometheus gauge tracks current state (0=CLOSED, 1=HALF_OPEN, 2=OPEN).
+- `circuit_breaker_trips_total` counter records each transition to OPEN.
+- `circuit_breaker_rejections_total` counter tracks fail-fast rejections.
+- Structured log events (`circuit_tripped`, `circuit_half_open`, `circuit_closed`) flow through Kafka → Loki for correlation with traces.
+
+### Chaos Engineering
+
+The `scripts/chaos_drill.py` tool validates resilience through three automated scenarios:
+1. **Downstream failure**: Induces Service C errors, verifies circuit trips and fail-fast latency drops from ~500ms to <5ms.
+2. **Pod kill MTTR**: Deletes Service C pod, measures Kubernetes self-healing time.
+3. **DB pool exhaustion**: Saturates the connection pool, verifies circuit breaker isolates the failure.
+
+Operational triage procedures are documented in [Incident Response Runbook](INCIDENT_RESPONSE_RUNBOOK.md).

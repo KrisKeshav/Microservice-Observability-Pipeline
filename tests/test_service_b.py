@@ -3,15 +3,24 @@ from unittest.mock import AsyncMock, patch
 import httpx
 from fastapi.testclient import TestClient
 
-from services.service_b.main import app
+from common.circuit_breaker import CircuitState
+from services.service_b.main import app, circuit_breaker
 
 client = TestClient(app)
+
+
+def setup_function():
+    # Reset circuit breaker before each test
+    circuit_breaker.state = CircuitState.CLOSED
+    circuit_breaker.failure_count = 0
+    circuit_breaker.success_count = 0
 
 
 def test_service_b_health():
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "service": "b"}
+    assert response.json()["status"] == "ok"
+    assert response.json()["circuit_state"] == "CLOSED"
 
 
 def test_service_b_process_order_success():
@@ -30,6 +39,17 @@ def test_service_b_process_order_downstream_error():
     with patch("httpx.AsyncClient.get", side_effect=httpx.HTTPStatusError("500 Error", request=httpx.Request("GET", "http://test"), response=mock_err_resp)):
         response = client.get("/internal/orders/ord-1", headers={"X-Request-ID": "req-b-2"})
         assert response.status_code == 502
+
+
+def test_service_b_circuit_breaker_fail_fast():
+    # Force circuit to OPEN
+    circuit_breaker.state = CircuitState.OPEN
+    circuit_breaker.recovery_timeout = 60.0
+
+    response = client.get("/internal/orders/ord-open", headers={"X-Request-ID": "req-b-open"})
+    assert response.status_code == 503
+    assert "Circuit Breaker OPEN" in response.json()["detail"]
+    assert "Retry-After" in response.headers
 
 
 def test_service_b_create_order_success():
