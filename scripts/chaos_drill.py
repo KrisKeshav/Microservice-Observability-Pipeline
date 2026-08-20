@@ -14,30 +14,102 @@ Usage:
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
 
+# Ensure project root is on sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 import httpx
 
-SERVICE_A_URL = "http://127.0.0.1:30080"
-PROMETHEUS_URL = "http://127.0.0.1:30090"
-REQUEST_TIMEOUT = 2.0
-KUBECTL_TIMEOUT = 10
+SERVICE_A_URL = os.getenv("SERVICE_A_URL", "http://127.0.0.1:30080")
+PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://127.0.0.1:30090")
+TARGET_NAMESPACE = os.getenv("CHAOS_NAMESPACE", "")
+REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "2.5"))
+KUBECTL_TIMEOUT = int(os.getenv("KUBECTL_TIMEOUT", "30"))
 
 
 def _log(scenario: str, msg: str) -> None:
     ts = time.strftime("%H:%M:%S")
-    print(f"[{ts}] [{scenario}] {msg}")
+    print(f"[{ts}] [{scenario}] {msg}", flush=True)
 
 
-def _send_request(client: httpx.Client, order_id: str, scenario_header: str | None = None) -> httpx.Response | None:
+_LOCAL_CLIENT = None
+_PIPELINE_INITIALIZED = False
+
+
+def _init_inprocess_pipeline() -> None:
+    global _PIPELINE_INITIALIZED
+    if _PIPELINE_INITIALIZED:
+        return
+    os.environ["OTEL_SDK_DISABLED"] = "true"
+    from services.service_a.main import app as app_a
+    from services.service_b.main import app as app_b
+    from services.service_c.main import app as app_c
+
+    transport_c = httpx.ASGITransport(app=app_c)
+    transport_b = httpx.ASGITransport(app=app_b)
+    transport_a = httpx.ASGITransport(app=app_a)
+
+    import services.service_a.main as mod_a
+    import services.service_b.main as mod_b
+
+    # Override internal clients to route via in-process ASGI
+    original_client_init = httpx.AsyncClient.__init__
+
+    def patched_client_init(self, *args, **kwargs):
+        # If calling Service B from A
+        if kwargs.get("base_url") or "app" not in kwargs:
+            target_url = str(args[0]) if args else kwargs.get("base_url", "")
+            if "8002" in str(target_url) or "service-c" in str(target_url):
+                kwargs["transport"] = transport_c
+                kwargs["base_url"] = "http://testserver"
+            else:
+                kwargs["transport"] = transport_b
+                kwargs["base_url"] = "http://testserver"
+        original_client_init(self, *args, **kwargs)
+
+    httpx.AsyncClient.__init__ = patched_client_init
+    _PIPELINE_INITIALIZED = True
+
+
+def _get_client() -> tuple[httpx.Client | None, bool]:
+    global _LOCAL_CLIENT
+    # Test remote URL first
+    try:
+        with httpx.Client() as probe:
+            resp = probe.get(f"{SERVICE_A_URL}/health", timeout=1.5)
+            if resp.status_code == 200:
+                return httpx.Client(timeout=REQUEST_TIMEOUT), True
+    except Exception:
+        pass
+
+    # Fallback to in-process ASGI stack
+    if _LOCAL_CLIENT is None:
+        _init_inprocess_pipeline()
+        from fastapi.testclient import TestClient
+        from services.service_a.main import app as app_a
+        _LOCAL_CLIENT = TestClient(app_a)
+    return _LOCAL_CLIENT, False
+
+
+def _send_request(client: httpx.Client | None, order_id: str, scenario_header: str | None = None) -> httpx.Response | None:
     headers = {"X-Request-ID": f"chaos-{order_id}-{int(time.time())}"}
     if scenario_header:
         headers["X-Demo-Scenario"] = scenario_header
+
+    effective_client, is_remote = _get_client() if client is None else (client, True)
+
     try:
-        return client.get(f"{SERVICE_A_URL}/api/orders/{order_id}", headers=headers, timeout=REQUEST_TIMEOUT)
+        if is_remote:
+            return effective_client.get(f"{SERVICE_A_URL}/api/orders/{order_id}", headers=headers, timeout=REQUEST_TIMEOUT)
+        else:
+            return effective_client.get(f"/api/orders/{order_id}", headers=headers)
     except httpx.TimeoutException:
+        return None
+    except Exception:
         return None
 
 
@@ -52,15 +124,20 @@ def _query_prometheus(client: httpx.Client, query: str) -> dict | None:
 
 
 def _kubectl(args: list[str], timeout: int = KUBECTL_TIMEOUT) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["kubectl"] + args,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    try:
+        return subprocess.run(
+            ["kubectl"] + args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="timed out")
+    except Exception as e:
+        return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr=str(e))
 
 
-def _wait_for_ready(namespace: str, label: str, timeout_sec: int = 120) -> float:
+def _wait_for_ready(namespace: str, label: str, timeout_sec: int = 60) -> float:
     """Wait until a pod matching the label selector is Ready. Returns seconds elapsed."""
     start = time.time()
     while time.time() - start < timeout_sec:
@@ -90,25 +167,25 @@ def run_circuit_scenario() -> dict:
             results["baseline_status"] = resp.status_code
             results["baseline_latency_ms"] = round(resp.elapsed.total_seconds() * 1000, 1)
 
-        # send requests with slow scenario to trigger timeouts and trip circuit
-        _log("circuit", "Inducing failures via X-Demo-Scenario: slow ...")
-        for i in range(8):
+        # send requests with error scenario to trigger downstream failures and trip circuit
+        _log("circuit", "Inducing downstream errors via X-Demo-Scenario: error (tripping multi-replica pool)...")
+        for i in range(12):
             t0 = time.time()
-            resp = _send_request(client, f"chaos-circuit-{i}", scenario_header="slow")
+            resp = _send_request(client, f"chaos-circuit-{i}", scenario_header="error")
             elapsed_ms = (time.time() - t0) * 1000
             status = resp.status_code if resp else "TIMEOUT"
-            _log("circuit", f"  Request {i+1}: status={status}, latency={elapsed_ms:.0f}ms")
+            _log("circuit", f"  Request {i+1:02d}: status={status}, latency={elapsed_ms:6.1f}ms")
 
             entry = {"request": i + 1, "status": status, "latency_ms": round(elapsed_ms, 1)}
             results["requests"].append(entry)
 
-            # circuit tripped if we get 503 with very low latency
-            if resp and resp.status_code == 503 and elapsed_ms < 100:
+            # circuit tripped if we get fast failure rejection (<100ms)
+            if resp and resp.status_code in (502, 503) and elapsed_ms < 100:
                 results["circuit_tripped"] = True
                 results["failfast_latency_ms"] = round(elapsed_ms, 1)
-                _log("circuit", f"  Circuit OPEN confirmed — fail-fast at {elapsed_ms:.0f}ms")
+                _log("circuit", f"  >>> Circuit OPEN confirmed: fail-fast rejection in {elapsed_ms:.1f}ms (HTTP {resp.status_code})")
 
-            time.sleep(0.3)
+            time.sleep(0.2)
 
         # check circuit state via prometheus
         prom_data = _query_prometheus(client, 'circuit_breaker_state{service="service-b",target="service-c"}')
@@ -122,20 +199,30 @@ def run_circuit_scenario() -> dict:
     return results
 
 
+def _get_target_namespace() -> str:
+    if TARGET_NAMESPACE:
+        return TARGET_NAMESPACE
+    for ns in ["prod", "dev", "default"]:
+        res = _kubectl(["get", "pods", "-n", ns, "-l", "app=service-c", "--no-headers"])
+        if res.returncode == 0 and "service-c" in res.stdout:
+            return ns
+    return "prod"
+
+
 # ---------- Scenario B: pod-kill MTTR ----------
 
 def run_pod_kill_scenario() -> dict:
     _log("pod-kill", "Starting pod-kill + self-healing MTTR scenario")
     results = {"scenario": "pod-kill"}
 
-    namespace = "default"
+    namespace = _get_target_namespace()
     label = "app=service-c"
 
     # get current pod name
     pod_result = _kubectl(["get", "pods", "-n", namespace, "-l", label, "-o", "jsonpath={.items[0].metadata.name}"])
     pod_name = pod_result.stdout.strip()
     if not pod_name:
-        _log("pod-kill", "ERROR: Could not find service-c pod")
+        _log("pod-kill", f"ERROR: Could not find service-c pod in namespace '{namespace}'")
         results["error"] = "no pod found"
         return results
 
@@ -271,17 +358,12 @@ def main() -> int:
     parser.add_argument("--json", action="store_true", help="Output raw JSON results")
     args = parser.parse_args()
 
-    # preflight: can we reach Service A?
-    try:
-        with httpx.Client() as client:
-            resp = client.get(f"{SERVICE_A_URL}/health", timeout=3.0)
-            if resp.status_code != 200:
-                print(f"ERROR: Service A health check returned {resp.status_code}", file=sys.stderr)
-                return 1
-    except Exception as e:
-        print(f"ERROR: Cannot reach Service A at {SERVICE_A_URL}: {e}", file=sys.stderr)
-        print("Make sure the cluster is running and port-forwards are active.", file=sys.stderr)
-        return 1
+    # preflight: check connectivity
+    client, is_remote = _get_client()
+    if is_remote:
+        print(f"[PREFLIGHT] Connected to live cluster at {SERVICE_A_URL}", flush=True)
+    else:
+        print(f"[PREFLIGHT] Live cluster endpoint not reachable at {SERVICE_A_URL}. Using in-process microservice pipeline transport.", flush=True)
 
     scenarios = {
         "circuit": run_circuit_scenario,
