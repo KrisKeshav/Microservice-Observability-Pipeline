@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Ensure project root is on sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -29,6 +30,7 @@ PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://127.0.0.1:30090")
 TARGET_NAMESPACE = os.getenv("CHAOS_NAMESPACE", "")
 REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "2.5"))
 KUBECTL_TIMEOUT = int(os.getenv("KUBECTL_TIMEOUT", "30"))
+DB_EXHAUST_CONCURRENCY = int(os.getenv("DB_EXHAUST_CONCURRENCY", "10"))
 
 
 def _log(scenario: str, msg: str) -> None:
@@ -75,7 +77,14 @@ def _init_inprocess_pipeline() -> None:
     _PIPELINE_INITIALIZED = True
 
 
-def _get_client() -> tuple[httpx.Client | None, bool]:
+def _get_client() -> tuple[httpx.Client, bool]:
+    """Determine which transport to use for this run.
+
+    Returns (client, is_remote). Callers MUST use the returned client/flag
+    for every request in the run -- do not open a separate httpx.Client()
+    and assume it talks to the remote cluster, since the cluster may not
+    be reachable.
+    """
     global _LOCAL_CLIENT
     # Test remote URL first
     try:
@@ -95,18 +104,16 @@ def _get_client() -> tuple[httpx.Client | None, bool]:
     return _LOCAL_CLIENT, False
 
 
-def _send_request(client: httpx.Client | None, order_id: str, scenario_header: str | None = None) -> httpx.Response | None:
+def _send_request(client: httpx.Client, is_remote: bool, order_id: str, scenario_header: str | None = None) -> httpx.Response | None:
     headers = {"X-Request-ID": f"chaos-{order_id}-{int(time.time())}"}
     if scenario_header:
         headers["X-Demo-Scenario"] = scenario_header
 
-    effective_client, is_remote = _get_client() if client is None else (client, True)
-
     try:
         if is_remote:
-            return effective_client.get(f"{SERVICE_A_URL}/api/orders/{order_id}", headers=headers, timeout=REQUEST_TIMEOUT)
+            return client.get(f"{SERVICE_A_URL}/api/orders/{order_id}", headers=headers, timeout=REQUEST_TIMEOUT)
         else:
-            return effective_client.get(f"/api/orders/{order_id}", headers=headers)
+            return client.get(f"/api/orders/{order_id}", headers=headers)
     except httpx.TimeoutException:
         return None
     except Exception:
@@ -137,63 +144,85 @@ def _kubectl(args: list[str], timeout: int = KUBECTL_TIMEOUT) -> subprocess.Comp
         return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr=str(e))
 
 
-def _wait_for_ready(namespace: str, label: str, timeout_sec: int = 60) -> float:
-    """Wait until a pod matching the label selector is Ready. Returns seconds elapsed."""
+def _wait_for_new_pod_ready(namespace: str, label: str, old_pod_name: str, timeout_sec: int = 120) -> tuple[float, str | None]:
+    """Wait until a pod matching the label selector, DIFFERENT from
+    old_pod_name, is Ready. Returns (seconds_elapsed, new_pod_name).
+
+    Checking readiness of "a" pod with this label isn't enough: with
+    multiple replicas (or during the old pod's terminating grace period)
+    that can trivially be true from t=0, which understates MTTR. We need
+    the *replacement* pod specifically.
+    """
     start = time.time()
+    new_pod_name = None
     while time.time() - start < timeout_sec:
         result = _kubectl([
             "get", "pods", "-n", namespace,
             "-l", label,
-            "-o", "jsonpath={.items[*].status.conditions[?(@.type=='Ready')].status}",
+            "-o", "json",
         ])
-        if "True" in result.stdout:
-            return time.time() - start
+        if result.returncode == 0 and result.stdout.strip():
+            try:
+                data = json.loads(result.stdout)
+            except json.JSONDecodeError:
+                data = {"items": []}
+            for pod in data.get("items", []):
+                name = pod.get("metadata", {}).get("name", "")
+                if not name or name == old_pod_name:
+                    continue
+                conditions = pod.get("status", {}).get("conditions", [])
+                is_ready = any(c.get("type") == "Ready" and c.get("status") == "True" for c in conditions)
+                if is_ready:
+                    new_pod_name = name
+                    return time.time() - start, new_pod_name
         time.sleep(2)
-    return time.time() - start
+    return time.time() - start, new_pod_name
 
 
 # ---------- Scenario A: downstream failure + circuit tripping ----------
 
-def run_circuit_scenario() -> dict:
+def run_circuit_scenario(client: httpx.Client, is_remote: bool) -> dict:
     _log("circuit", "Starting downstream failure + circuit breaker scenario")
     results = {"scenario": "circuit", "requests": [], "circuit_tripped": False}
 
-    with httpx.Client() as client:
-        # baseline healthy request
-        _log("circuit", "Sending baseline healthy request...")
-        resp = _send_request(client, "baseline-healthy")
-        if resp:
-            _log("circuit", f"Baseline: {resp.status_code} ({resp.elapsed.total_seconds()*1000:.0f}ms)")
-            results["baseline_status"] = resp.status_code
-            results["baseline_latency_ms"] = round(resp.elapsed.total_seconds() * 1000, 1)
+    # baseline healthy request
+    _log("circuit", "Sending baseline healthy request...")
+    resp = _send_request(client, is_remote, "baseline-healthy")
+    if resp:
+        _log("circuit", f"Baseline: {resp.status_code} ({resp.elapsed.total_seconds()*1000:.0f}ms)")
+        results["baseline_status"] = resp.status_code
+        results["baseline_latency_ms"] = round(resp.elapsed.total_seconds() * 1000, 1)
 
-        # send requests with error scenario to trigger downstream failures and trip circuit
-        _log("circuit", "Inducing downstream errors via X-Demo-Scenario: error (tripping multi-replica pool)...")
-        for i in range(12):
-            t0 = time.time()
-            resp = _send_request(client, f"chaos-circuit-{i}", scenario_header="error")
-            elapsed_ms = (time.time() - t0) * 1000
-            status = resp.status_code if resp else "TIMEOUT"
-            _log("circuit", f"  Request {i+1:02d}: status={status}, latency={elapsed_ms:6.1f}ms")
+    # send requests with error scenario to trigger downstream failures and trip circuit
+    _log("circuit", "Inducing downstream errors via X-Demo-Scenario: error (tripping multi-replica pool)...")
+    for i in range(12):
+        t0 = time.time()
+        resp = _send_request(client, is_remote, f"chaos-circuit-{i}", scenario_header="error")
+        elapsed_ms = (time.time() - t0) * 1000
+        status = resp.status_code if resp else "TIMEOUT"
+        _log("circuit", f"  Request {i+1:02d}: status={status}, latency={elapsed_ms:6.1f}ms")
 
-            entry = {"request": i + 1, "status": status, "latency_ms": round(elapsed_ms, 1)}
-            results["requests"].append(entry)
+        entry = {"request": i + 1, "status": status, "latency_ms": round(elapsed_ms, 1)}
+        results["requests"].append(entry)
 
-            # circuit tripped if we get fast failure rejection (<100ms)
-            if resp and resp.status_code in (502, 503) and elapsed_ms < 100:
-                results["circuit_tripped"] = True
-                results["failfast_latency_ms"] = round(elapsed_ms, 1)
-                _log("circuit", f"  >>> Circuit OPEN confirmed: fail-fast rejection in {elapsed_ms:.1f}ms (HTTP {resp.status_code})")
+        # circuit tripped if we get fast failure rejection (<100ms)
+        if resp and resp.status_code in (502, 503) and elapsed_ms < 100:
+            results["circuit_tripped"] = True
+            results["failfast_latency_ms"] = round(elapsed_ms, 1)
+            _log("circuit", f"  >>> Circuit OPEN confirmed: fail-fast rejection in {elapsed_ms:.1f}ms (HTTP {resp.status_code})")
 
-            time.sleep(0.2)
+        time.sleep(0.2)
 
-        # check circuit state via prometheus
+    # check circuit state via prometheus (only meaningful against the live cluster)
+    if is_remote:
         prom_data = _query_prometheus(client, 'circuit_breaker_state{service="service-b",target="service-c"}')
         if prom_data and prom_data.get("data", {}).get("result"):
             state_val = prom_data["data"]["result"][0]["value"][1]
             state_name = {0: "CLOSED", 1: "HALF_OPEN", 2: "OPEN"}.get(int(float(state_val)), "UNKNOWN")
             results["prometheus_circuit_state"] = state_name
             _log("circuit", f"Prometheus circuit_breaker_state = {state_name}")
+    else:
+        _log("circuit", "Skipping Prometheus circuit-state check (no live cluster/Prometheus in in-process mode)")
 
     _log("circuit", f"Circuit tripped: {results['circuit_tripped']}")
     return results
@@ -206,16 +235,26 @@ def _get_target_namespace() -> str:
         res = _kubectl(["get", "pods", "-n", ns, "-l", "app=service-c", "--no-headers"])
         if res.returncode == 0 and "service-c" in res.stdout:
             return ns
-    return "prod"
+    return ""
 
 
 # ---------- Scenario B: pod-kill MTTR ----------
 
-def run_pod_kill_scenario() -> dict:
+def run_pod_kill_scenario(client: httpx.Client, is_remote: bool) -> dict:
     _log("pod-kill", "Starting pod-kill + self-healing MTTR scenario")
     results = {"scenario": "pod-kill"}
 
+    if not is_remote:
+        _log("pod-kill", "SKIPPED: no live cluster reachable, cannot exercise real pod deletion/recovery in in-process mode")
+        results["error"] = "no live cluster (in-process mode does not support pod-kill)"
+        return results
+
     namespace = _get_target_namespace()
+    if not namespace:
+        _log("pod-kill", "ERROR: Could not determine a namespace running service-c; refusing to guess (would risk targeting the wrong/prod namespace)")
+        results["error"] = "no namespace found running service-c"
+        return results
+
     label = "app=service-c"
 
     # get current pod name
@@ -233,47 +272,63 @@ def run_pod_kill_scenario() -> dict:
     delete_start = time.time()
     _kubectl(["delete", "pod", pod_name, "-n", namespace, "--grace-period=0", "--force"], timeout=30)
 
-    # measure time until new pod is Ready
+    # measure time until the *replacement* pod is Ready (not just "any" pod)
     _log("pod-kill", "Waiting for replacement pod to become Ready...")
-    ready_elapsed = _wait_for_ready(namespace, label, timeout_sec=120)
+    ready_elapsed, new_pod_name = _wait_for_new_pod_ready(namespace, label, old_pod_name=pod_name, timeout_sec=120)
     total_mttr = time.time() - delete_start
 
     results["deleted_pod"] = pod_name
+    results["replacement_pod"] = new_pod_name
     results["mttr_seconds"] = round(total_mttr, 1)
     results["ready_elapsed_seconds"] = round(ready_elapsed, 1)
-    _log("pod-kill", f"MTTR: {total_mttr:.1f}s (pod ready in {ready_elapsed:.1f}s)")
+    if new_pod_name:
+        _log("pod-kill", f"MTTR: {total_mttr:.1f}s (replacement pod '{new_pod_name}' ready in {ready_elapsed:.1f}s)")
+    else:
+        _log("pod-kill", f"WARNING: no replacement pod became Ready within timeout ({ready_elapsed:.1f}s elapsed)")
 
     # verify service is functional after recovery
-    with httpx.Client() as client:
-        time.sleep(2)  # brief grace period for readiness probe
-        resp = _send_request(client, "post-recovery-check")
-        if resp:
-            results["post_recovery_status"] = resp.status_code
-            _log("pod-kill", f"Post-recovery health check: {resp.status_code}")
-        else:
-            results["post_recovery_status"] = "TIMEOUT"
-            _log("pod-kill", "Post-recovery health check: TIMEOUT")
+    time.sleep(2)  # brief grace period for readiness probe
+    resp = _send_request(client, is_remote, "post-recovery-check")
+    if resp:
+        results["post_recovery_status"] = resp.status_code
+        _log("pod-kill", f"Post-recovery health check: {resp.status_code}")
+    else:
+        results["post_recovery_status"] = "TIMEOUT"
+        _log("pod-kill", "Post-recovery health check: TIMEOUT")
 
     return results
 
 
 # ---------- Scenario C: DB pool exhaustion ----------
 
-def run_db_exhaust_scenario() -> dict:
+def run_db_exhaust_scenario(client: httpx.Client, is_remote: bool) -> dict:
     _log("db-exhaust", "Starting DB pool exhaustion scenario")
     results = {"scenario": "db-exhaust", "requests": []}
 
-    with httpx.Client() as client:
-        # fire concurrent-ish requests to saturate DB_POOL_SIZE=3
-        _log("db-exhaust", "Sending burst of slow requests to exhaust pool...")
-        for i in range(10):
-            resp = _send_request(client, f"chaos-dbpool-{i}", scenario_header="slow")
-            status = resp.status_code if resp else "TIMEOUT"
-            latency_ms = resp.elapsed.total_seconds() * 1000 if resp else REQUEST_TIMEOUT * 1000
-            _log("db-exhaust", f"  Request {i+1}: status={status}, latency={latency_ms:.0f}ms")
-            results["requests"].append({"request": i + 1, "status": status, "latency_ms": round(latency_ms, 1)})
+    # Fire genuinely concurrent requests to saturate DB_POOL_SIZE=3.
+    # (Sequential requests release their connection before the next request
+    # is issued, so they can't actually exhaust a small connection pool.)
+    _log("db-exhaust", f"Sending concurrent burst of {DB_EXHAUST_CONCURRENCY} slow requests to exhaust pool...")
 
-        # check for DBPoolExhaustion alert via prometheus
+    def _do_request(i: int) -> dict:
+        t0 = time.time()
+        resp = _send_request(client, is_remote, f"chaos-dbpool-{i}", scenario_header="slow")
+        elapsed_ms = (time.time() - t0) * 1000
+        status = resp.status_code if resp else "TIMEOUT"
+        return {"request": i + 1, "status": status, "latency_ms": round(elapsed_ms, 1)}
+
+    entries_by_index: dict[int, dict] = {}
+    with ThreadPoolExecutor(max_workers=DB_EXHAUST_CONCURRENCY) as pool:
+        futures = {pool.submit(_do_request, i): i for i in range(DB_EXHAUST_CONCURRENCY)}
+        for future in as_completed(futures):
+            entry = future.result()
+            entries_by_index[entry["request"]] = entry
+            _log("db-exhaust", f"  Request {entry['request']}: status={entry['status']}, latency={entry['latency_ms']:.0f}ms")
+
+    results["requests"] = [entries_by_index[i] for i in sorted(entries_by_index)]
+
+    # check for DBPoolExhaustion alert via prometheus (live cluster only)
+    if is_remote:
         prom_data = _query_prometheus(client, 'ALERTS{alertname="DbPoolExhaustion"}')
         if prom_data and prom_data.get("data", {}).get("result"):
             results["db_pool_alert_firing"] = True
@@ -282,17 +337,18 @@ def run_db_exhaust_scenario() -> dict:
             results["db_pool_alert_firing"] = False
             _log("db-exhaust", "DbPoolExhaustion alert not firing (may need sustained load)")
 
-        # check circuit state after exhaustion
         prom_data = _query_prometheus(client, 'circuit_breaker_state{service="service-b",target="service-c"}')
         if prom_data and prom_data.get("data", {}).get("result"):
             state_val = prom_data["data"]["result"][0]["value"][1]
             state_name = {0: "CLOSED", 1: "HALF_OPEN", 2: "OPEN"}.get(int(float(state_val)), "UNKNOWN")
             results["circuit_state_after_exhaust"] = state_name
             _log("db-exhaust", f"Circuit state after exhaustion: {state_name}")
+    else:
+        _log("db-exhaust", "Skipping Prometheus checks (no live cluster/Prometheus in in-process mode)")
 
     error_count = sum(1 for r in results["requests"] if r["status"] in (502, 503, 504, "TIMEOUT"))
     results["error_count"] = error_count
-    _log("db-exhaust", f"Errors during burst: {error_count}/10")
+    _log("db-exhaust", f"Errors during burst: {error_count}/{DB_EXHAUST_CONCURRENCY}")
     return results
 
 
@@ -306,6 +362,10 @@ def print_report(all_results: list[dict]) -> None:
     for result in all_results:
         scenario = result.get("scenario", "unknown")
         print(f"\n--- {scenario.upper()} ---")
+
+        if result.get("error"):
+            print(f"  SKIPPED/ERROR: {result['error']}")
+            continue
 
         if scenario == "circuit":
             tripped = result.get("circuit_tripped", False)
@@ -326,9 +386,10 @@ def print_report(all_results: list[dict]) -> None:
 
         elif scenario == "db-exhaust":
             errors = result.get("error_count", 0)
+            total = len(result.get("requests", []))
             alert = result.get("db_pool_alert_firing", False)
             cb_state = result.get("circuit_state_after_exhaust", "N/A")
-            print(f"  Errors during burst:  {errors}/10")
+            print(f"  Errors during burst:  {errors}/{total}")
             print(f"  DB pool alert firing: {'YES' if alert else 'NO'}")
             print(f"  Circuit state:        {cb_state}")
 
@@ -358,7 +419,7 @@ def main() -> int:
     parser.add_argument("--json", action="store_true", help="Output raw JSON results")
     args = parser.parse_args()
 
-    # preflight: check connectivity
+    # preflight: determine transport ONCE, and reuse it for every scenario in this run
     client, is_remote = _get_client()
     if is_remote:
         print(f"[PREFLIGHT] Connected to live cluster at {SERVICE_A_URL}", flush=True)
@@ -379,9 +440,12 @@ def main() -> int:
     all_results = []
     for name in to_run:
         print(f"\n{'='*50}")
-        result = scenarios[name]()
+        result = scenarios[name](client, is_remote)
         all_results.append(result)
         print(f"{'='*50}\n")
+
+    if is_remote:
+        client.close()
 
     if args.json:
         print(json.dumps(all_results, indent=2))
