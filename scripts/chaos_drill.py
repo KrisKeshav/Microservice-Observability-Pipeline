@@ -47,16 +47,11 @@ def _init_inprocess_pipeline() -> None:
     if _PIPELINE_INITIALIZED:
         return
     os.environ["OTEL_SDK_DISABLED"] = "true"
-    from services.service_a.main import app as app_a
     from services.service_b.main import app as app_b
     from services.service_c.main import app as app_c
 
     transport_c = httpx.ASGITransport(app=app_c)
     transport_b = httpx.ASGITransport(app=app_b)
-    transport_a = httpx.ASGITransport(app=app_a)
-
-    import services.service_a.main as mod_a
-    import services.service_b.main as mod_b
 
     # Override internal clients to route via in-process ASGI
     original_client_init = httpx.AsyncClient.__init__
@@ -99,6 +94,7 @@ def _get_client() -> tuple[httpx.Client, bool]:
     if _LOCAL_CLIENT is None:
         _init_inprocess_pipeline()
         from fastapi.testclient import TestClient
+
         from services.service_a.main import app as app_a
         _LOCAL_CLIENT = TestClient(app_a)
     return _LOCAL_CLIENT, False
