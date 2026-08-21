@@ -3,6 +3,8 @@ from unittest.mock import patch
 import httpx
 
 from scripts.chaos_drill import (
+    _alertmanager_has_firing_alert,
+    _prometheus_scalar,
     _query_prometheus,
     _send_request,
     print_report,
@@ -48,6 +50,19 @@ def test_query_prometheus_failure():
         assert result is None
 
 
+def test_prometheus_scalar_returns_first_vector_value():
+    response = {"data": {"result": [{"value": [1234567890, "0"]}]}}
+    assert _prometheus_scalar(response) == 0.0
+    assert _prometheus_scalar({"data": {"result": []}}) is None
+
+
+def test_alertmanager_has_firing_telemetry_alert():
+    alerts = [{"status": {"state": "active"}, "labels": {"alertname": "TelemetryServiceDown"}}]
+    mock_response = httpx.Response(200, json=alerts, request=httpx.Request("GET", "http://test"))
+    with patch("httpx.Client.get", return_value=mock_response):
+        assert _alertmanager_has_firing_alert(httpx.Client(), "TelemetryServiceDown") is True
+
+
 def test_print_report_circuit(capsys):
     results = [
         {
@@ -91,3 +106,22 @@ def test_print_report_db_exhaust(capsys):
     captured = capsys.readouterr()
     assert "DB-EXHAUST" in captured.out
     assert "7/10" in captured.out
+
+
+def test_print_report_pipeline_component_kill(capsys):
+    print_report([
+        {
+            "scenario": "pipeline-component-kill",
+            "component": "fluent-bit-shipper",
+            "up_before": 1.0,
+            "up_during": 0.0,
+            "up_after": 1.0,
+            "alertmanager_firing": True,
+            "recovery_seconds": 23.4,
+            "slack_confirmation_required": True,
+        }
+    ])
+    captured = capsys.readouterr()
+    assert "PIPELINE-COMPONENT-KILL" in captured.out
+    assert "1.0/0.0/1.0" in captured.out
+    assert "Slack confirmation" in captured.out

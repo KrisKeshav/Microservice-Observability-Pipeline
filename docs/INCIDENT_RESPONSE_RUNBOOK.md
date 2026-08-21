@@ -14,6 +14,8 @@ The existing [Failure Trace Runbook](FAILURE_TRACE_RUNBOOK.md) covers *how to tr
 | `DbPoolExhaustion` | critical | `db_pool_active >= db_pool_max` for 10s | Reduce load or scale Service C, check for connection leaks |
 | `KafkaConsumerLagHigh` | warning | Consumer lag > 50 messages for 1m | Check consumer health, restart if stuck |
 | `TelemetryServiceDown` | critical | Prometheus cannot scrape Loki/Jaeger/Fluent Bit/Kafka Exporter for 1m | Check pod status, restart if CrashLooping |
+| `SLOFastBurn` | critical | Service A availability or latency budget burns >14.4x across 1h and 5m windows | Page; stop the budget burn and investigate immediately |
+| `SLOSlowBurn` | warning | Service A availability or latency budget burns >6x across 6h and 30m windows | Investigate before the budget is exhausted |
 
 ---
 
@@ -184,6 +186,49 @@ The `kafka_consumergroup_lag` metric exceeds 50 messages for >1 minute on the `a
 | Loki unreachable | Check Loki pod status, PVC storage, restart if needed |
 | Anomaly detector stuck | `kubectl rollout restart deployment anomaly-detector` |
 | Sustained high throughput | Increase Kafka partitions + consumer replicas |
+
+---
+
+## Incident 5: `TelemetryServiceDown` - Telemetry Pipeline Down
+
+### What It Means
+
+Prometheus has been unable to scrape a telemetry component for one minute. Application traffic can still be healthy, but the ability to observe it is degraded. Treat this as urgent because it can mask a concurrent application incident.
+
+### First Triage Steps
+
+1. Identify the affected `job` label in Alertmanager or Grafana:
+   ```promql
+   up{job=~"loki|jaeger|fluent-bit-shipper|fluent-bit-consumer|kafka-exporter"}
+   ```
+2. Check the workload and its recent events:
+   ```powershell
+   kubectl get pods -n <namespace> -l app=<component>
+   kubectl describe pod -n <namespace> <pod-name>
+   kubectl logs -n <namespace> <pod-name> --previous
+   ```
+3. Confirm that Prometheus can reach the target again after the workload becomes Ready.
+
+### Distinguishing the Component
+
+| Affected job | Likely impact | First component-specific checks |
+|---|---|---|
+| `fluent-bit-shipper` | New container logs are not shipped to Kafka | Confirm DaemonSet pods on every node; inspect `/api/v1/health`; verify Kafka connectivity in Fluent Bit logs. |
+| `fluent-bit-consumer` | Kafka log backlog grows and Loki stops receiving new records | Check `kafka_consumergroup_lag`, consumer logs, and the Loki endpoint. |
+| `kafka-exporter` | Kafka telemetry is missing; log delivery may still function | Check exporter configuration first, then Kafka broker health. Do not infer a Kafka outage from exporter scrape failure alone. |
+| `loki` | Logs cannot be queried or ingested | Check Loki readiness, memory/disk pressure, and consumer output errors. |
+| `jaeger` | New traces are unavailable | Check collector/query readiness and OTLP connectivity. |
+
+### Pipeline Chaos Drill
+
+The `pipeline-component-kill` scenario deletes one Fluent Bit shipper pod, records `up{job=~"loki|jaeger|fluent-bit.*"}` before/during/after, waits for `TelemetryServiceDown` in Alertmanager, and measures recovery after Kubernetes recreates the pod.
+
+```powershell
+$env:CHAOS_NAMESPACE = "dev" # use the live target namespace
+.venv\Scripts\python scripts/chaos_drill.py --scenario pipeline-component-kill --json
+```
+
+Alertmanager confirmation is automated. Slack delivery must be confirmed in `#observability-alerts` because the webhook is write-only and does not provide a delivery-status API to the drill.
 
 ---
 

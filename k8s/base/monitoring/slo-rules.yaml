@@ -1,0 +1,116 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-slo-rules
+data:
+  slo-rules.yml: |
+    groups:
+      - name: service-a-slos
+        rules:
+          - record: slo:service_a:availability_error_ratio:rate5m
+            expr: |
+              sum(rate(http_requests_total{job="service-a",status=~"5.."}[5m]))
+              /
+              clamp_min(sum(rate(http_requests_total{job="service-a"}[5m])), 1)
+          - record: slo:service_a:availability_error_ratio:rate1h
+            expr: |
+              sum(rate(http_requests_total{job="service-a",status=~"5.."}[1h]))
+              /
+              clamp_min(sum(rate(http_requests_total{job="service-a"}[1h])), 1)
+          - record: slo:service_a:availability_error_ratio:rate30m
+            expr: |
+              sum(rate(http_requests_total{job="service-a",status=~"5.."}[30m]))
+              /
+              clamp_min(sum(rate(http_requests_total{job="service-a"}[30m])), 1)
+          - record: slo:service_a:availability_error_ratio:rate6h
+            expr: |
+              sum(rate(http_requests_total{job="service-a",status=~"5.."}[6h]))
+              /
+              clamp_min(sum(rate(http_requests_total{job="service-a"}[6h])), 1)
+          - record: slo:service_a:availability_error_ratio:rate30d
+            expr: |
+              sum(rate(http_requests_total{job="service-a",status=~"5.."}[30d]))
+              /
+              clamp_min(sum(rate(http_requests_total{job="service-a"}[30d])), 1)
+          - record: slo:service_a:orders_latency_bad_ratio:rate5m
+            expr: |
+              1 - (
+                sum(rate(http_request_duration_seconds_bucket{job="service-a",handler="/api/orders/{order_id}",le="0.3"}[5m]))
+                /
+                clamp_min(sum(rate(http_request_duration_seconds_count{job="service-a",handler="/api/orders/{order_id}"}[5m])), 1)
+              )
+          - record: slo:service_a:orders_latency_bad_ratio:rate1h
+            expr: |
+              1 - (
+                sum(rate(http_request_duration_seconds_bucket{job="service-a",handler="/api/orders/{order_id}",le="0.3"}[1h]))
+                /
+                clamp_min(sum(rate(http_request_duration_seconds_count{job="service-a",handler="/api/orders/{order_id}"}[1h])), 1)
+              )
+          - record: slo:service_a:orders_latency_bad_ratio:rate30m
+            expr: |
+              1 - (
+                sum(rate(http_request_duration_seconds_bucket{job="service-a",handler="/api/orders/{order_id}",le="0.3"}[30m]))
+                /
+                clamp_min(sum(rate(http_request_duration_seconds_count{job="service-a",handler="/api/orders/{order_id}"}[30m])), 1)
+              )
+          - record: slo:service_a:orders_latency_bad_ratio:rate6h
+            expr: |
+              1 - (
+                sum(rate(http_request_duration_seconds_bucket{job="service-a",handler="/api/orders/{order_id}",le="0.3"}[6h]))
+                /
+                clamp_min(sum(rate(http_request_duration_seconds_count{job="service-a",handler="/api/orders/{order_id}"}[6h])), 1)
+              )
+          - record: slo:service_a:orders_latency_bad_ratio:rate30d
+            expr: |
+              1 - (
+                sum(rate(http_request_duration_seconds_bucket{job="service-a",handler="/api/orders/{order_id}",le="0.3"}[30d]))
+                /
+                clamp_min(sum(rate(http_request_duration_seconds_count{job="service-a",handler="/api/orders/{order_id}"}[30d])), 1)
+              )
+          - record: slo:service_a:availability_burn_rate:5m
+            expr: slo:service_a:availability_error_ratio:rate5m / 0.01
+          - record: slo:service_a:availability_burn_rate:1h
+            expr: slo:service_a:availability_error_ratio:rate1h / 0.01
+          - record: slo:service_a:availability_burn_rate:30m
+            expr: slo:service_a:availability_error_ratio:rate30m / 0.01
+          - record: slo:service_a:availability_burn_rate:6h
+            expr: slo:service_a:availability_error_ratio:rate6h / 0.01
+          - record: slo:service_a:latency_burn_rate:5m
+            expr: slo:service_a:orders_latency_bad_ratio:rate5m / 0.05
+          - record: slo:service_a:latency_burn_rate:1h
+            expr: slo:service_a:orders_latency_bad_ratio:rate1h / 0.05
+          - record: slo:service_a:latency_burn_rate:30m
+            expr: slo:service_a:orders_latency_bad_ratio:rate30m / 0.05
+          - record: slo:service_a:latency_burn_rate:6h
+            expr: slo:service_a:orders_latency_bad_ratio:rate6h / 0.05
+          - record: slo:service_a:error_budget_remaining:30d
+            expr: clamp_max(1 - (slo:service_a:availability_error_ratio:rate30d / 0.01), 1)
+
+      - name: service-a-slo-alerts
+        rules:
+          - alert: SLOFastBurn
+            expr: |
+              (slo:service_a:availability_burn_rate:1h > 14.4 and slo:service_a:availability_burn_rate:5m > 14.4)
+              or
+              (slo:service_a:latency_burn_rate:1h > 14.4 and slo:service_a:latency_burn_rate:5m > 14.4)
+            for: 5m
+            labels:
+              severity: critical
+              service: service-a
+              slo: availability-or-latency
+            annotations:
+              summary: "Service A SLO fast burn"
+              description: "Service A is consuming its SLO error budget at more than 14.4x over both the 1h and 5m windows."
+          - alert: SLOSlowBurn
+            expr: |
+              (slo:service_a:availability_burn_rate:6h > 6 and slo:service_a:availability_burn_rate:30m > 6)
+              or
+              (slo:service_a:latency_burn_rate:6h > 6 and slo:service_a:latency_burn_rate:30m > 6)
+            for: 30m
+            labels:
+              severity: warning
+              service: service-a
+              slo: availability-or-latency
+            annotations:
+              summary: "Service A SLO slow burn"
+              description: "Service A is consuming its SLO error budget at more than 6x over both the 6h and 30m windows."

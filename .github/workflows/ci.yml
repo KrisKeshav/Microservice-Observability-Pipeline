@@ -109,7 +109,7 @@ jobs:
           path: /tmp/${{ matrix.service }}.tar
 
   scan:
-    name: Security Scan (Trivy)
+    name: Container Security Scan (Trivy)
     runs-on: ubuntu-latest
     needs: build
     strategy:
@@ -129,19 +129,46 @@ jobs:
         run: docker load -i /tmp/${{ matrix.service }}.tar
 
       - name: Run Trivy Vulnerability Scanner
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.33.1
         with:
           image-ref: ${{ matrix.service }}:${{ github.sha }}
           format: "table"
-          exit-code: "0"
+          exit-code: "1"
           ignore-unfixed: true
           vuln-type: "os,library"
           severity: "CRITICAL,HIGH"
 
+  dependency-and-manifest-security:
+    name: Dependency & Manifest Security
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Audit Python dependencies
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          pip-audit -r requirements.txt
+
+      - name: Render Kubernetes manifests
+        run: kubectl kustomize k8s/overlays/dev > /tmp/k8s-dev.yaml
+
+      - name: Score Kubernetes workload security
+        run: |
+          docker run --rm -v "/tmp/k8s-dev.yaml:/k8s-dev.yaml:ro" zegl/kube-score:v1.18.0 \
+            score /k8s-dev.yaml --output-format ci
+
   push:
     name: Push Images to GHCR
     runs-on: ubuntu-latest
-    needs: scan
+    needs: [scan, dependency-and-manifest-security]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     strategy:
       matrix:

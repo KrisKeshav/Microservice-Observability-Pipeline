@@ -395,6 +395,40 @@ data:
           ],
           "title": "Error Logs Stream",
           "type": "logs"
+        },
+        {
+          "collapsed": false,
+          "gridPos": {"h": 1, "w": 24, "x": 0, "y": 50},
+          "id": 12,
+          "title": "SLO / Error Budget",
+          "type": "row"
+        },
+        {
+          "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}, "overrides": []},
+          "gridPos": {"h": 8, "w": 8, "x": 0, "y": 51},
+          "id": 13,
+          "options": {"orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "showThresholdLabels": false, "showThresholdMarkers": true},
+          "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "editorMode": "code", "expr": "slo:service_a:error_budget_remaining:30d", "refId": "A"}],
+          "title": "Availability Error Budget Remaining (30d)",
+          "type": "gauge"
+        },
+        {
+          "gridPos": {"h": 8, "w": 8, "x": 8, "y": 51},
+          "id": 14,
+          "targets": [
+            {"datasource": {"type": "prometheus", "uid": "prometheus"}, "editorMode": "code", "expr": "slo:service_a:availability_burn_rate:5m", "legendFormat": "Availability 5m", "range": true, "refId": "A"},
+            {"datasource": {"type": "prometheus", "uid": "prometheus"}, "editorMode": "code", "expr": "slo:service_a:latency_burn_rate:5m", "legendFormat": "Latency 5m", "range": true, "refId": "B"}
+          ],
+          "title": "SLO Burn Rate Over Time",
+          "type": "timeseries"
+        },
+        {
+          "gridPos": {"h": 8, "w": 8, "x": 16, "y": 51},
+          "id": 15,
+          "options": {"showHeader": true, "sortBy": [{"displayName": "Time", "desc": true}]},
+          "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "editorMode": "code", "expr": "ALERTS{alertname=~\"SLOFastBurn|SLOSlowBurn\",alertstate=\"firing\"}", "format": "table", "instant": true, "refId": "A"}],
+          "title": "Current SLO Alert State",
+          "type": "table"
         }
       ],
       "refresh": "5s",

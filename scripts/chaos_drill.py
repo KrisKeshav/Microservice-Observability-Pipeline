@@ -27,7 +27,9 @@ import httpx
 
 SERVICE_A_URL = os.getenv("SERVICE_A_URL", "http://127.0.0.1:30080")
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://127.0.0.1:30090")
+ALERTMANAGER_URL = os.getenv("ALERTMANAGER_URL", "http://127.0.0.1:30093")
 TARGET_NAMESPACE = os.getenv("CHAOS_NAMESPACE", "")
+PIPELINE_COMPONENT = os.getenv("PIPELINE_COMPONENT", "fluent-bit-shipper")
 REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "2.5"))
 KUBECTL_TIMEOUT = int(os.getenv("KUBECTL_TIMEOUT", "30"))
 DB_EXHAUST_CONCURRENCY = int(os.getenv("DB_EXHAUST_CONCURRENCY", "10"))
@@ -124,6 +126,43 @@ def _query_prometheus(client: httpx.Client, query: str) -> dict | None:
     except Exception:
         pass
     return None
+
+
+def _prometheus_scalar(response: dict | None) -> float | None:
+    """Return the first Prometheus vector value, if one is available."""
+    try:
+        result = response["data"]["result"]
+        if not result:
+            return None
+        return float(result[0]["value"][1])
+    except (KeyError, TypeError, ValueError, IndexError):
+        return None
+
+
+def _wait_for_prometheus_value(
+    client: httpx.Client, query: str, expected: float, timeout_sec: int = 90
+) -> tuple[float | None, float | None]:
+    start = time.time()
+    last_value = None
+    while time.time() - start < timeout_sec:
+        last_value = _prometheus_scalar(_query_prometheus(client, query))
+        if last_value == expected:
+            return round(time.time() - start, 1), last_value
+        time.sleep(5)
+    return None, last_value
+
+
+def _alertmanager_has_firing_alert(client: httpx.Client, alert_name: str) -> bool:
+    try:
+        response = client.get(f"{ALERTMANAGER_URL}/api/v2/alerts", timeout=5.0)
+        response.raise_for_status()
+        return any(
+            alert.get("status", {}).get("state") == "active"
+            and alert.get("labels", {}).get("alertname") == alert_name
+            for alert in response.json()
+        )
+    except (httpx.HTTPError, TypeError, ValueError):
+        return False
 
 
 def _kubectl(args: list[str], timeout: int = KUBECTL_TIMEOUT) -> subprocess.CompletedProcess:
@@ -224,12 +263,12 @@ def run_circuit_scenario(client: httpx.Client, is_remote: bool) -> dict:
     return results
 
 
-def _get_target_namespace() -> str:
+def _get_target_namespace(label: str = "app=service-c") -> str:
     if TARGET_NAMESPACE:
         return TARGET_NAMESPACE
     for ns in ["prod", "dev", "default"]:
-        res = _kubectl(["get", "pods", "-n", ns, "-l", "app=service-c", "--no-headers"])
-        if res.returncode == 0 and "service-c" in res.stdout:
+        res = _kubectl(["get", "pods", "-n", ns, "-l", label, "--no-headers"])
+        if res.returncode == 0 and res.stdout.strip():
             return ns
     return ""
 
@@ -348,6 +387,76 @@ def run_db_exhaust_scenario(client: httpx.Client, is_remote: bool) -> dict:
     return results
 
 
+# ---------- Scenario D: telemetry pipeline component kill ----------
+
+def run_pipeline_component_kill_scenario(client: httpx.Client, is_remote: bool) -> dict:
+    """Delete the Fluent Bit shipper and measure telemetry-alert detection/recovery.
+
+    The alert can be confirmed through Alertmanager's API. Slack delivery remains an
+    external side effect, so the drill records that a human must confirm it in the
+    configured Slack channel during the live verification.
+    """
+    component = PIPELINE_COMPONENT
+    results = {"scenario": "pipeline-component-kill", "component": component}
+    _log("pipeline-component-kill", f"Starting telemetry pipeline drill for {component}")
+
+    if component != "fluent-bit-shipper":
+        results["error"] = "only fluent-bit-shipper is supported because it is directly scraped by TelemetryServiceDown"
+        return results
+    if not is_remote:
+        results["error"] = "no live cluster (in-process mode does not support pipeline component deletion)"
+        return results
+
+    namespace = _get_target_namespace(f"app={component}")
+    if not namespace:
+        results["error"] = f"no namespace found running {component}"
+        return results
+
+    pod_result = _kubectl([
+        "get", "pods", "-n", namespace, "-l", f"app={component}",
+        "-o", "jsonpath={.items[0].metadata.name}",
+    ])
+    pod_name = pod_result.stdout.strip()
+    if pod_result.returncode != 0 or not pod_name:
+        results["error"] = f"no {component} pod found in namespace {namespace}"
+        return results
+
+    up_query = 'min(up{job=~"loki|jaeger|fluent-bit.*"})'
+    results["up_before"] = _prometheus_scalar(_query_prometheus(client, up_query))
+    _log("pipeline-component-kill", f"up before deletion: {results['up_before']}")
+
+    delete_start = time.time()
+    deleted = _kubectl(["delete", "pod", pod_name, "-n", namespace, "--grace-period=0", "--force"], timeout=30)
+    if deleted.returncode != 0:
+        results["error"] = f"failed to delete {pod_name}: {deleted.stderr.strip()}"
+        return results
+    results["deleted_pod"] = pod_name
+
+    down_elapsed, down_value = _wait_for_prometheus_value(client, up_query, 0.0, timeout_sec=90)
+    results["up_during"] = down_value
+    results["down_detected_seconds"] = down_elapsed
+    _log("pipeline-component-kill", f"up during deletion: {down_value}")
+
+    alert_deadline = time.time() + 90
+    while time.time() < alert_deadline and not _alertmanager_has_firing_alert(client, "TelemetryServiceDown"):
+        time.sleep(5)
+    results["alertmanager_firing"] = _alertmanager_has_firing_alert(client, "TelemetryServiceDown")
+    results["slack_confirmation_required"] = True
+    _log("pipeline-component-kill", f"TelemetryServiceDown in Alertmanager: {results['alertmanager_firing']}")
+
+    ready_elapsed, replacement_pod = _wait_for_new_pod_ready(
+        namespace, f"app={component}", old_pod_name=pod_name, timeout_sec=120
+    )
+    up_elapsed, up_after = _wait_for_prometheus_value(client, up_query, 1.0, timeout_sec=120)
+    results["replacement_pod"] = replacement_pod
+    results["up_after"] = up_after
+    results["recovery_seconds"] = round(time.time() - delete_start, 1)
+    results["pod_ready_seconds"] = round(ready_elapsed, 1)
+    results["metric_recovered_seconds"] = up_elapsed
+    _log("pipeline-component-kill", f"up after recovery: {up_after}; recovery time: {results['recovery_seconds']}s")
+    return results
+
+
 # ---------- Report ----------
 
 def print_report(all_results: list[dict]) -> None:
@@ -389,6 +498,14 @@ def print_report(all_results: list[dict]) -> None:
             print(f"  DB pool alert firing: {'YES' if alert else 'NO'}")
             print(f"  Circuit state:        {cb_state}")
 
+        elif scenario == "pipeline-component-kill":
+            print(f"  Component:            {result.get('component', 'N/A')}")
+            print(f"  up (before/during/after): {result.get('up_before', 'N/A')}/{result.get('up_during', 'N/A')}/{result.get('up_after', 'N/A')}")
+            print(f"  Alertmanager firing:  {'YES' if result.get('alertmanager_firing') else 'NO'}")
+            print(f"  Recovery time:        {result.get('recovery_seconds', 'N/A')}s")
+            if result.get("slack_confirmation_required"):
+                print("  Slack confirmation:   REQUIRED (verify configured channel manually)")
+
     print("\n" + "=" * 70)
 
     # MTTR comparison table
@@ -408,7 +525,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run chaos drill scenarios against the live cluster")
     parser.add_argument(
         "--scenario",
-        choices=["all", "circuit", "pod-kill", "db-exhaust"],
+        choices=["all", "circuit", "pod-kill", "db-exhaust", "pipeline-component-kill"],
         default="all",
         help="Which chaos scenario to run (default: all)",
     )
@@ -426,6 +543,7 @@ def main() -> int:
         "circuit": run_circuit_scenario,
         "pod-kill": run_pod_kill_scenario,
         "db-exhaust": run_db_exhaust_scenario,
+        "pipeline-component-kill": run_pipeline_component_kill_scenario,
     }
 
     if args.scenario == "all":

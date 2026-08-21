@@ -78,6 +78,7 @@ spec:
           args:
             - "--config.file=/etc/prometheus/prometheus.yml"
             - "--storage.tsdb.path=/prometheus"
+            - "--storage.tsdb.retention.time=35d"
             - "--web.enable-lifecycle"
           ports:
             - containerPort: 9090
@@ -111,8 +112,12 @@ spec:
           configMap:
             name: prometheus-config
         - name: rules
-          configMap:
-            name: prometheus-alert-rules
+          projected:
+            sources:
+              - configMap:
+                  name: prometheus-alert-rules
+              - configMap:
+                  name: prometheus-slo-rules
 ---
 apiVersion: v1
 kind: Service

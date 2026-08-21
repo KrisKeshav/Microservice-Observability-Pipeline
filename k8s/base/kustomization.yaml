@@ -20,6 +20,7 @@ resources:
   - logging/grafana.yaml
   - tracing/jaeger.yaml
   - monitoring/alert-rules.yaml
+  - monitoring/slo-rules.yaml
   - monitoring/prometheus.yaml
   - monitoring/alertmanager.yaml
   - monitoring/kafka-exporter.yaml
