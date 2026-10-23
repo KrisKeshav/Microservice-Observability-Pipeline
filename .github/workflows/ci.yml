@@ -97,7 +97,7 @@ jobs:
 
       # Build once and load locally; the exact image that is scanned is the one we push.
       - name: Build image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           build-args: SERVICE=${{ matrix.module }}
