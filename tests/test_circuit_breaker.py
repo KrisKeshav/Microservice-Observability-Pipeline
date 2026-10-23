@@ -6,84 +6,107 @@ import pytest
 from common.circuit_breaker import CircuitBreaker, CircuitBreakerOpenException, CircuitState
 
 
-def test_circuit_breaker_closed_success():
-    async def _test():
-        cb = CircuitBreaker("test-service", "target-service", failure_threshold=2, recovery_timeout=1.0)
-        mock_func = AsyncMock(return_value="ok")
+def _breaker(threshold: int = 2, recovery: float = 0.1) -> CircuitBreaker:
+    return CircuitBreaker("test-service", "target-service", failure_threshold=threshold, recovery_timeout=recovery)
 
-        result = await cb.call(mock_func)
-        assert result == "ok"
+
+def test_closed_success():
+    async def _test():
+        cb = _breaker()
+        assert await cb.call(AsyncMock(return_value="ok")) == "ok"
         assert cb.state == CircuitState.CLOSED
         assert cb.failure_count == 0
 
     asyncio.run(_test())
 
 
-def test_circuit_breaker_trips_to_open():
+def test_trips_to_open_and_fails_fast():
     async def _test():
-        cb = CircuitBreaker("test-service", "target-service", failure_threshold=2, recovery_timeout=0.2)
-        mock_func = AsyncMock(side_effect=RuntimeError("connection error"))
+        cb = _breaker(threshold=2, recovery=60)
+        failing = AsyncMock(side_effect=RuntimeError("down"))
 
-        # Attempt 1 -> fails
         with pytest.raises(RuntimeError):
-            await cb.call(mock_func, retries=0)
+            await cb.call(failing)
         assert cb.state == CircuitState.CLOSED
-        assert cb.failure_count == 1
 
-        # Attempt 2 -> fails and reaches threshold (2) -> trips to OPEN
         with pytest.raises(RuntimeError):
-            await cb.call(mock_func, retries=0)
+            await cb.call(failing)
         assert cb.state == CircuitState.OPEN
 
-        # Immediate next attempt -> fail fast without calling func
-        mock_func.reset_mock()
+        failing.reset_mock()
         with pytest.raises(CircuitBreakerOpenException) as exc_info:
-            await cb.call(mock_func)
-        assert exc_info.value.target == "target-service"
-        assert mock_func.call_count == 0
+            await cb.call(failing)
+        assert failing.call_count == 0
+        assert exc_info.value.retry_after_header == "60"
 
     asyncio.run(_test())
 
 
-def test_circuit_breaker_recovery_half_open_to_closed():
+def test_half_open_success_closes():
     async def _test():
-        cb = CircuitBreaker("test-service", "target-service", failure_threshold=1, recovery_timeout=0.1)
-        failing_func = AsyncMock(side_effect=RuntimeError("downstream down"))
-
-        # Trip to OPEN
+        cb = _breaker(threshold=1)
         with pytest.raises(RuntimeError):
-            await cb.call(failing_func, retries=0)
-        assert cb.state == CircuitState.OPEN
-
-        # Wait for recovery timeout
+            await cb.call(AsyncMock(side_effect=RuntimeError("down")))
         await asyncio.sleep(0.15)
 
-        # Next call should transition to HALF_OPEN and succeed -> resets to CLOSED
-        success_func = AsyncMock(return_value="recovered")
-        result = await cb.call(success_func, retries=0)
-        assert result == "recovered"
+        assert await cb.call(AsyncMock(return_value="recovered")) == "recovered"
         assert cb.state == CircuitState.CLOSED
-        assert cb.failure_count == 0
 
     asyncio.run(_test())
 
 
-def test_circuit_breaker_half_open_failure_re_trips():
+def test_half_open_failure_reopens():
     async def _test():
-        cb = CircuitBreaker("test-service", "target-service", failure_threshold=1, recovery_timeout=0.1)
-        failing_func = AsyncMock(side_effect=RuntimeError("downstream down"))
-
-        # Trip to OPEN
+        cb = _breaker(threshold=1)
+        failing = AsyncMock(side_effect=RuntimeError("down"))
         with pytest.raises(RuntimeError):
-            await cb.call(failing_func, retries=0)
-        assert cb.state == CircuitState.OPEN
-
-        # Wait for recovery timeout
+            await cb.call(failing)
         await asyncio.sleep(0.15)
 
-        # Next call transitions to HALF_OPEN but fails -> immediately re-trips to OPEN
         with pytest.raises(RuntimeError):
-            await cb.call(failing_func, retries=0)
+            await cb.call(failing)
         assert cb.state == CircuitState.OPEN
+
+    asyncio.run(_test())
+
+
+def test_half_open_allows_only_one_probe():
+    async def _test():
+        cb = _breaker(threshold=1)
+        with pytest.raises(RuntimeError):
+            await cb.call(AsyncMock(side_effect=RuntimeError("down")))
+        await asyncio.sleep(0.15)
+
+        release = asyncio.Event()
+
+        async def slow_probe():
+            await release.wait()
+            return "ok"
+
+        probe = asyncio.create_task(cb.call(slow_probe))
+        await asyncio.sleep(0)
+        assert cb.state == CircuitState.HALF_OPEN
+
+        with pytest.raises(CircuitBreakerOpenException):
+            await cb.call(AsyncMock(return_value="second"))
+
+        release.set()
+        assert await probe == "ok"
+        assert cb.state == CircuitState.CLOSED
+
+    asyncio.run(_test())
+
+
+def test_retries_only_listed_exceptions():
+    async def _test():
+        cb = _breaker(threshold=5)
+        flaky = AsyncMock(side_effect=[ConnectionError("refused"), "ok"])
+        assert await cb.call(flaky, retries=1, retry_on=(ConnectionError,), backoff_seconds=0) == "ok"
+        assert flaky.call_count == 2
+
+        not_retried = AsyncMock(side_effect=TimeoutError("slow"))
+        with pytest.raises(TimeoutError):
+            await cb.call(not_retried, retries=1, retry_on=(ConnectionError,), backoff_seconds=0)
+        assert not_retried.call_count == 1
 
     asyncio.run(_test())

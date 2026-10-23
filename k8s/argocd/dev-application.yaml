@@ -1,3 +1,4 @@
+# Dev follows main: CI commits each new image tag to k8s/overlays/dev, Argo CD deploys it.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

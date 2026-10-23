@@ -1,0 +1,13 @@
+# Dev only: allow the X-Demo-Scenario header to force errors and slow queries for drills.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: service-c
+spec:
+  template:
+    spec:
+      containers:
+        - name: service-c
+          env:
+            - name: FAULT_INJECTION_ENABLED
+              value: "true"

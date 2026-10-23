@@ -1,199 +1,123 @@
 {
-  "annotations": {
+  "uid": "microservice-observability",
+  "title": "Microservice Observability Pipeline",
+  "tags": [
+    "observability",
+    "slo"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 3,
+  "refresh": "10s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "editable": false,
+  "templating": {
     "list": [
       {
-        "builtIn": 1,
-        "datasource": "-- Grafana --",
-        "enable": true,
-        "hide": true,
-        "name": "Annotations & Alerts",
-        "type": "dashboard"
+        "name": "request_id",
+        "label": "Request ID",
+        "type": "textbox",
+        "query": "",
+        "current": {
+          "text": "",
+          "value": ""
+        }
       }
     ]
   },
-  "editable": true,
-  "fiscalYearStartMonth": 0,
-  "graphTooltip": 1,
-  "id": null,
-  "links": [],
-  "liveNow": false,
   "panels": [
     {
-      "collapsed": false,
-      "gridPos": {
-        "h": 4,
-        "w": 24,
-        "x": 0,
-        "y": 0
-      },
       "id": 1,
+      "title": "How to read this dashboard",
+      "type": "text",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 3
+      },
       "options": {
-        "code": {
-          "language": "plaintext",
-          "showLineNumbers": false
-        },
-        "content": "### 🚀 Microservice Observability Pipeline (Metrics, Meta-Monitoring & Telemetry)\n**HTTP Chain:** Client ➔ Service A (`:8000`) ➔ Service B (`:8001`) ➔ Service C (`:8002`) ➔ Postgres DB\n**Telemetry Flow:** Stdout ➔ Fluent Bit Shipper ➔ Kafka (`app-logs`) ➔ Fluent Bit Consumer ➔ Loki & Jaeger\n**Meta-Monitoring:** Prometheus scrapes Services (RED), Kafka Exporter (Consumer Lag), Fluent Bit, Loki, & Jaeger. Alertmanager pages Slack.",
-        "mode": "markdown"
-      },
-      "pluginVersion": "10.0.0",
-      "title": "Pipeline Overview & Architecture",
-      "type": "text"
+        "mode": "markdown",
+        "content": "**Request path:** Client → Service A → Service B → Service C → Postgres.  **Logs:** stdout → Fluent Bit → Kafka → Fluent Bit → Loki (click a `trace_id` to open the trace in Jaeger).  **Start at the SLO row**, then use RED metrics to find the failing service, then logs/traces to find why."
+      }
     },
     {
-      "collapsed": false,
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 0,
-        "y": 4
-      },
       "id": 2,
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "sum by (service) (rate(http_requests_total[1m]))",
-          "legendFormat": "{{service}}",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "RED: Request Rate (req/s)",
-      "type": "timeseries"
+      "title": "SLO / Error budget (Service A)",
+      "type": "row",
+      "gridPos": {
+        "x": 0,
+        "y": 3,
+        "w": 24,
+        "h": 1
+      }
     },
     {
-      "collapsed": false,
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 8,
-        "y": 4
-      },
       "id": 3,
+      "title": "Availability error budget remaining (30d)",
+      "type": "gauge",
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 8,
+        "h": 7
+      },
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "editorMode": "code",
-          "expr": "sum by (service) (rate(http_requests_total{status=~\"5..\"}[1m]))",
-          "legendFormat": "{{service}} (5xx)",
-          "range": true,
+          "expr": "slo:service_a:error_budget_remaining:30d",
           "refId": "A"
         }
       ],
-      "title": "RED: 5xx Error Rate (errors/s)",
-      "type": "timeseries"
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.25
+              },
+              {
+                "color": "green",
+                "value": 0.5
+              }
+            ]
+          }
+        }
+      }
     },
     {
-      "collapsed": false,
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 4
-      },
       "id": 4,
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le, service) (rate(http_request_duration_seconds_bucket[1m]))) * 1000",
-          "legendFormat": "{{service}} p95",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "RED: p95 Request Duration (ms)",
-      "type": "timeseries"
-    },
-    {
-      "collapsed": false,
+      "title": "Burn rate (1 = spending budget exactly on schedule)",
+      "type": "timeseries",
       "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 0,
-        "y": 12
-      },
-      "id": 5,
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "db_pool_active",
-          "legendFormat": "Active Connections",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "db_pool_max",
-          "legendFormat": "Max Pool Capacity",
-          "range": true,
-          "refId": "B"
-        }
-      ],
-      "title": "Service C: Postgres DB Pool Utilization",
-      "type": "timeseries"
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 8,
-        "w": 8,
         "x": 8,
-        "y": 12
-      },
-      "id": 6,
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "sum by (consumergroup) (kafka_consumergroup_lag{topic=\"app-logs\"})",
-          "legendFormat": "Lag: {{consumergroup}}",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Meta-Monitoring: Kafka Consumer Lag",
-      "type": "timeseries"
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 8,
+        "y": 4,
         "w": 8,
-        "x": 16,
-        "y": 12
+        "h": 7
       },
-      "id": 7,
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "editorMode": "code",
-          "expr": "sum by (job) (rate(fluentbit_output_proc_records_total[1m]))",
-          "legendFormat": "{{job}} shipped records/s",
-          "range": true,
+          "expr": "slo:service_a:availability_burn_rate:5m",
+          "legendFormat": "availability 5m",
           "refId": "A"
         },
         {
@@ -201,164 +125,351 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "editorMode": "code",
-          "expr": "sum by (job) (rate(fluentbit_output_retries_total[1m]))",
-          "legendFormat": "{{job}} retries/s",
-          "range": true,
+          "expr": "slo:service_a:latency_burn_rate:5m",
+          "legendFormat": "latency 5m",
           "refId": "B"
         }
-      ],
-      "title": "Meta-Monitoring: Fluent Bit Buffer & Retries",
-      "type": "timeseries"
+      ]
     },
     {
-      "collapsed": false,
+      "id": 5,
+      "title": "Firing alerts",
+      "type": "table",
       "gridPos": {
-        "h": 8,
-        "w": 14,
-        "x": 0,
-        "y": 20
+        "x": 16,
+        "y": 4,
+        "w": 8,
+        "h": 7
       },
-      "id": 8,
       "targets": [
         {
           "datasource": {
-            "type": "loki",
-            "uid": "loki"
+            "type": "prometheus",
+            "uid": "prometheus"
           },
-          "editorMode": "code",
-          "expr": "sum(count_over_time({job=\"fluent-bit\"} | json [1m])) by (service)",
-          "queryType": "range",
+          "expr": "ALERTS{alertstate=\"firing\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "RED metrics per service",
+      "type": "row",
+      "gridPos": {
+        "x": 0,
+        "y": 11,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 7,
+      "title": "Rate (req/s)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (job) (rate(http_requests_total[1m]))",
+          "legendFormat": "{{job}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Errors (5xx ratio)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 8,
+        "y": 12,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (job) (rate(http_requests_total{status=~\"5..\"}[1m])) / sum by (job) (rate(http_requests_total[1m]))",
+          "legendFormat": "{{job}}",
           "refId": "A"
         }
       ],
-      "title": "Log Ingestion Rate by Service (Loki)",
-      "type": "timeseries"
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        }
+      }
     },
     {
-      "collapsed": false,
-      "gridPos": {
-        "h": 8,
-        "w": 10,
-        "x": 14,
-        "y": 20
-      },
       "id": 9,
+      "title": "Duration p95",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 16,
+        "y": 12,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, job) (rate(http_request_duration_seconds_bucket[1m])))",
+          "legendFormat": "{{job}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "id": 10,
+      "title": "Resilience",
+      "type": "row",
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 11,
+      "title": "Service C DB pool (active vs max)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 21,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (pod) (db_pool_active)",
+          "legendFormat": "active {{pod}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(db_pool_max)",
+          "legendFormat": "max",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Circuit breaker state (0 closed, 1 half-open, 2 open)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 8,
+        "y": 21,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (pod) (circuit_breaker_state)",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "Anomaly detector alerts (Postgres)",
+      "type": "table",
+      "gridPos": {
+        "x": 16,
+        "y": 21,
+        "w": 8,
+        "h": 8
+      },
       "targets": [
         {
           "datasource": {
             "type": "postgres",
             "uid": "postgres"
           },
-          "editorMode": "builder",
           "format": "table",
-          "rawSql": "SELECT id, detected_at, window_sec, error_count, total_count, error_rate FROM anomaly_alerts ORDER BY id DESC LIMIT 10;",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT detected_at, error_count, total_count, round(error_rate::numeric, 2) AS error_rate FROM anomaly_alerts ORDER BY id DESC LIMIT 10",
           "refId": "A"
         }
-      ],
-      "title": "Anomaly Alerts Table (PostgreSQL)",
-      "type": "table"
+      ]
     },
     {
-      "collapsed": false,
+      "id": 14,
+      "title": "Telemetry pipeline health",
+      "type": "row",
       "gridPos": {
-        "h": 12,
-        "w": 24,
         "x": 0,
-        "y": 28
-      },
-      "id": 10,
-      "options": {
-        "dedupStrategy": "none",
-        "enableLogDetails": true,
-        "showLabels": false,
-        "showCommonLabels": false,
-        "showLogLabels": true,
-        "showTime": true,
-        "sortOrder": "Descending",
-        "wrapLogMessage": true
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "loki",
-            "uid": "loki"
-          },
-          "editorMode": "code",
-          "expr": "{job=\"fluent-bit\"} | json | request_id =~ \"(?i).*${request_id}.*\"",
-          "queryType": "range",
-          "refId": "A"
-        }
-      ],
-      "title": "Unified Log Telemetry Stream (Filterable by Request ID)",
-      "type": "logs"
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 10,
+        "y": 29,
         "w": 24,
-        "x": 0,
-        "y": 40
-      },
-      "id": 11,
-      "options": {
-        "dedupStrategy": "none",
-        "enableLogDetails": true,
-        "showLabels": false,
-        "showCommonLabels": false,
-        "showLogLabels": true,
-        "showTime": true,
-        "sortOrder": "Descending",
-        "wrapLogMessage": true
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "loki",
-            "uid": "loki"
-          },
-          "editorMode": "code",
-          "expr": "{job=\"fluent-bit\"} | json | levelname = \"ERROR\"",
-          "queryType": "range",
-          "refId": "A"
-        }
-      ],
-      "title": "Error Logs Stream",
-      "type": "logs"
-    }
-  ],
-  "refresh": "5s",
-  "schemaVersion": 38,
-  "style": "dark",
-  "tags": ["observability", "microservices", "loki", "jaeger", "prometheus"],
-  "templating": {
-    "list": [
-      {
-        "current": {
-          "selected": false,
-          "text": "",
-          "value": ""
-        },
-        "hide": 0,
-        "label": "Request ID Filter",
-        "name": "request_id",
-        "options": [],
-        "query": "",
-        "skipUrlSync": false,
-        "type": "textbox"
+        "h": 1
       }
-    ]
-  },
-  "time": {
-    "from": "now-15m",
-    "to": "now"
-  },
-  "timepicker": {
-    "refresh_intervals": ["5s", "10s", "30s", "1m"]
-  },
-  "timezone": "browser",
-  "title": "Microservice Observability Pipeline",
-  "uid": "microservice-observability",
-  "version": 2
+    },
+    {
+      "id": 15,
+      "title": "Scrape targets up",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 30,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "min by (job) (up)",
+          "legendFormat": "{{job}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "title": "Kafka consumer lag (messages)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 8,
+        "y": 30,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (consumergroup) (kafka_consumergroup_lag{topic=\"app-logs\"})",
+          "legendFormat": "{{consumergroup}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "title": "Log lines per second by service (Loki)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 16,
+        "y": 30,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum by (name) (rate({job=\"fluent-bit\"} [1m]))",
+          "legendFormat": "{{name}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "title": "Logs",
+      "type": "row",
+      "gridPos": {
+        "x": 0,
+        "y": 38,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 19,
+      "title": "Logs for request ID (set the variable above)",
+      "type": "logs",
+      "gridPos": {
+        "x": 0,
+        "y": 39,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{job=\"fluent-bit\"} |= \"$request_id\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "enableLogDetails": true,
+        "sortOrder": "Ascending"
+      }
+    },
+    {
+      "id": 20,
+      "title": "Error logs",
+      "type": "logs",
+      "gridPos": {
+        "x": 0,
+        "y": 49,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{job=\"fluent-bit\", levelname=\"ERROR\"}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "enableLogDetails": true,
+        "sortOrder": "Descending"
+      }
+    }
+  ]
 }

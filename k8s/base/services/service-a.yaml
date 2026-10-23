@@ -13,16 +13,25 @@ spec:
     metadata:
       labels:
         app: service-a
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: service-a
-          image: service-a:latest
-          imagePullPolicy: IfNotPresent
+          image: service-a
           ports:
             - containerPort: 8000
           env:
             - name: SERVICE_B_URL
               value: "http://service-b:8000"
+            # Longer than Service B's timeout to Service C, so B always answers first.
             - name: SERVICE_B_TIMEOUT_SECONDS
               value: "5"
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -34,31 +43,34 @@ spec:
             limits:
               cpu: 200m
               memory: 128Mi
-
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           readinessProbe:
             httpGet:
-              path: /health
+              path: /ready
               port: 8000
-            initialDelaySeconds: 10
+            initialDelaySeconds: 5
             periodSeconds: 5
-            timeoutSeconds: 5
           livenessProbe:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 20
+            initialDelaySeconds: 15
             periodSeconds: 10
-            timeoutSeconds: 5
+            failureThreshold: 3
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: service-a
 spec:
-  type: NodePort
+  type: ClusterIP
   selector:
     app: service-a
   ports:
-    - port: 8000
+    - name: http
+      port: 8000
       targetPort: 8000
-      nodePort: 30080

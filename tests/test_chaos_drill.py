@@ -1,127 +1,72 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import httpx
+import pytest
 
-from scripts.chaos_drill import (
-    _alertmanager_has_firing_alert,
-    _prometheus_scalar,
-    _query_prometheus,
-    _send_request,
-    print_report,
-)
+import scripts.chaos_drill as drill
 
 
-def test_send_request_success():
-    mock_resp = httpx.Response(200, json={"status": "ok"}, request=httpx.Request("GET", "http://test"))
-    with patch("httpx.Client.get", return_value=mock_resp):
-        client = httpx.Client()
-        result = _send_request(client, True, "test-order")
-        assert result is not None
-        assert result.status_code == 200
+def _resp(status: int, headers: dict | None = None, payload=None) -> httpx.Response:
+    return httpx.Response(status, headers=headers, json=payload, request=httpx.Request("GET", "http://test"))
 
 
-def test_send_request_timeout():
-    with patch("httpx.Client.get", side_effect=httpx.TimeoutException("timeout")):
-        client = httpx.Client()
-        result = _send_request(client, True, "test-timeout")
-        assert result is None
+def test_circuit_rejection_requires_503_with_retry_after():
+    assert drill.is_circuit_rejection(_resp(503, {"Retry-After": "5"})) is True
+    # A fast 502 from a plain downstream error is NOT the breaker.
+    assert drill.is_circuit_rejection(_resp(502)) is False
+    assert drill.is_circuit_rejection(_resp(503)) is False
+    assert drill.is_circuit_rejection(None) is False
 
 
-def test_query_prometheus_success():
-    prom_response = {
-        "status": "success",
-        "data": {
-            "resultType": "vector",
-            "result": [{"value": [1234567890, "2"]}],
-        },
-    }
-    mock_resp = httpx.Response(200, json=prom_response, request=httpx.Request("GET", "http://test"))
-    with patch("httpx.Client.get", return_value=mock_resp):
-        client = httpx.Client()
-        result = _query_prometheus(client, "circuit_breaker_state")
-        assert result is not None
-        assert result["data"]["result"][0]["value"][1] == "2"
+def test_send_order_request_reports_timeout():
+    client = MagicMock()
+    client.get.side_effect = httpx.TimeoutException("slow")
+    status, _, resp = drill.send_order_request(client)
+    assert status == "TIMEOUT"
+    assert resp is None
 
 
-def test_query_prometheus_failure():
-    with patch("httpx.Client.get", side_effect=Exception("connection refused")):
-        client = httpx.Client()
-        result = _query_prometheus(client, "some_query")
-        assert result is None
+def test_query_prometheus_returns_first_value():
+    client = MagicMock()
+    client.get.return_value = _resp(200, payload={"data": {"result": [{"value": [0, "2"]}]}})
+    assert drill.query_prometheus(client, "circuit_breaker_state") == 2.0
+    client.get.return_value = _resp(200, payload={"data": {"result": []}})
+    assert drill.query_prometheus(client, "circuit_breaker_state") is None
 
 
-def test_prometheus_scalar_returns_first_vector_value():
-    response = {"data": {"result": [{"value": [1234567890, "0"]}]}}
-    assert _prometheus_scalar(response) == 0.0
-    assert _prometheus_scalar({"data": {"result": []}}) is None
-
-
-def test_alertmanager_has_firing_telemetry_alert():
-    alerts = [{"status": {"state": "active"}, "labels": {"alertname": "TelemetryServiceDown"}}]
-    mock_response = httpx.Response(200, json=alerts, request=httpx.Request("GET", "http://test"))
-    with patch("httpx.Client.get", return_value=mock_response):
-        assert _alertmanager_has_firing_alert(httpx.Client(), "TelemetryServiceDown") is True
-
-
-def test_print_report_circuit(capsys):
-    results = [
-        {
-            "scenario": "circuit",
-            "circuit_tripped": True,
-            "baseline_latency_ms": 450.0,
-            "failfast_latency_ms": 3.2,
-        }
-    ]
-    print_report(results)
-    captured = capsys.readouterr()
-    assert "CIRCUIT" in captured.out
-    assert "3.2ms" in captured.out
-
-
-def test_print_report_pod_kill(capsys):
-    results = [
-        {
-            "scenario": "pod-kill",
-            "mttr_seconds": 12.5,
-            "post_recovery_status": 200,
-        }
-    ]
-    print_report(results)
-    captured = capsys.readouterr()
-    assert "POD-KILL" in captured.out
-    assert "12.5s" in captured.out
-
-
-def test_print_report_db_exhaust(capsys):
-    results = [
-        {
-            "scenario": "db-exhaust",
-            "error_count": 7,
-            "requests": [{}] * 10,
-            "db_pool_alert_firing": True,
-            "circuit_state_after_exhaust": "OPEN",
-        }
-    ]
-    print_report(results)
-    captured = capsys.readouterr()
-    assert "DB-EXHAUST" in captured.out
-    assert "7/10" in captured.out
-
-
-def test_print_report_pipeline_component_kill(capsys):
-    print_report([
-        {
-            "scenario": "pipeline-component-kill",
-            "component": "fluent-bit-shipper",
-            "up_before": 1.0,
-            "up_during": 0.0,
-            "up_after": 1.0,
-            "alertmanager_firing": True,
-            "recovery_seconds": 23.4,
-            "slack_confirmation_required": True,
-        }
+def test_alertmanager_has_firing_alert():
+    client = MagicMock()
+    client.get.return_value = _resp(200, payload=[
+        {"labels": {"alertname": "TelemetryServiceDown"}, "status": {"state": "active"}},
+        {"labels": {"alertname": "DbPoolExhaustion"}, "status": {"state": "suppressed"}},
     ])
-    captured = capsys.readouterr()
-    assert "PIPELINE-COMPONENT-KILL" in captured.out
-    assert "1.0/0.0/1.0" in captured.out
-    assert "Slack confirmation" in captured.out
+    assert drill.alertmanager_has_firing_alert(client, "TelemetryServiceDown") is True
+    assert drill.alertmanager_has_firing_alert(client, "DbPoolExhaustion") is False
+
+
+def test_refuses_to_run_against_prod(monkeypatch, capsys):
+    monkeypatch.setattr(drill, "NAMESPACE", "prod")
+    with patch("sys.argv", ["chaos_drill.py"]):
+        assert drill.main() == 2
+    assert "Refusing" in capsys.readouterr().out
+
+
+def test_circuit_scenario_detects_breaker(monkeypatch):
+    calls = iter([("502", 40.0, _resp(502))] * 3 + [(503, 2.0, _resp(503, {"Retry-After": "5"}))] * 7 + [(200, 30.0, None)])
+    monkeypatch.setattr(drill, "send_order_request", lambda *a, **k: next(calls))
+    monkeypatch.setattr(drill, "query_prometheus", lambda *a: 2.0)
+    monkeypatch.setattr(drill.time, "sleep", lambda s: None)
+    result = drill.run_circuit(MagicMock())
+    assert result["circuit_opened"] is True
+    assert result["requests_before_open"] == 3
+    assert result["avg_rejection_latency_ms"] == 2.0
+    assert result["recovered_status"] == 200
+
+
+@pytest.mark.parametrize("scenario", ["circuit", "pod-kill", "db-exhaust", "log-buffer"])
+def test_print_report_shows_only_measured_values(scenario, capsys):
+    drill.print_report([{"scenario": scenario, "measured_value": 12.5}])
+    out = capsys.readouterr().out
+    assert scenario.upper() in out
+    assert "12.5" in out
+    assert "MTTR COMPARISON" not in out

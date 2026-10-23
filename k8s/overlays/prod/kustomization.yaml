@@ -5,10 +5,26 @@ namespace: prod
 
 resources:
   - ../../base
+  - pdb.yaml
 
 labels:
   - pairs:
       environment: prod
 
+# Changed only by the "Promote to prod" workflow, which opens a pull request.
+images:
+  - name: service-a
+    newName: ghcr.io/kriskeshav/microservice-observability-pipeline/service-a
+    newTag: initial
+  - name: service-b
+    newName: ghcr.io/kriskeshav/microservice-observability-pipeline/service-b
+    newTag: initial
+  - name: service-c
+    newName: ghcr.io/kriskeshav/microservice-observability-pipeline/service-c
+    newTag: initial
+  - name: anomaly-detector
+    newName: ghcr.io/kriskeshav/microservice-observability-pipeline/anomaly-detector
+    newTag: initial
+
 patches:
-  - path: patches/replica-patches.yaml
+  - path: patches/replicas.yaml

@@ -1,0 +1,51 @@
+groups:
+  - name: service-alerts
+    rules:
+      - alert: HighErrorRate
+        expr: |
+          sum by (job) (rate(http_requests_total{status=~"5.."}[1m]))
+            / sum by (job) (rate(http_requests_total[1m])) > 0.05
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High 5xx error rate on {{ $labels.job }}"
+          description: "{{ $value | humanizePercentage }} of requests to {{ $labels.job }} are failing (threshold 5%)."
+
+      - alert: DbPoolExhaustion
+        expr: max by (job, pod) (db_pool_active) >= max by (job, pod) (db_pool_max)
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Database connection pool exhausted on {{ $labels.pod }}"
+          description: "Every connection in the pool is in use; new queries wait and then fail with 503."
+
+      - alert: AppTargetDown
+        expr: up{job=~"service-a|service-b|service-c|anomaly-detector"} == 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Prometheus cannot scrape {{ $labels.pod }}"
+          description: "{{ $labels.job }} pod {{ $labels.pod }} has not answered metrics scrapes for 1 minute."
+
+  - name: pipeline-alerts
+    rules:
+      - alert: TelemetryServiceDown
+        expr: up{job=~"loki|jaeger|fluent-bit-shipper|fluent-bit-consumer|kafka-exporter|alertmanager"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Telemetry component {{ $labels.job }} is down"
+          description: "Prometheus has not been able to scrape {{ $labels.job }} for 1 minute."
+
+      - alert: KafkaConsumerLagHigh
+        expr: sum by (consumergroup) (kafka_consumergroup_lag) > 100
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kafka consumer group {{ $labels.consumergroup }} is falling behind"
+          description: "{{ $value }} log messages are waiting to be consumed."

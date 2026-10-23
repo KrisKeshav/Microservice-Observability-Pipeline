@@ -14,13 +14,16 @@ spec:
       labels:
         app: jaeger
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: jaeger
-          image: jaegertracing/all-in-one:latest
-          imagePullPolicy: IfNotPresent
-          env:
-            - name: COLLECTOR_OTLP_ENABLED
-              value: "true"
+          # Jaeger v2 with its default all-in-one config (in-memory trace storage).
+          image: jaegertracing/jaeger:2.5.0
           ports:
             - containerPort: 16686
               name: ui
@@ -28,25 +31,32 @@ spec:
               name: otlp-grpc
             - containerPort: 4318
               name: otlp-http
-            - containerPort: 14269
+            - containerPort: 8888
               name: metrics
+            - containerPort: 13133
+              name: health
           resources:
             requests:
               cpu: 100m
               memory: 128Mi
             limits:
               cpu: 300m
-              memory: 256Mi
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           readinessProbe:
             httpGet:
-              path: /
-              port: 16686
+              path: /status
+              port: 13133
             initialDelaySeconds: 5
             periodSeconds: 5
           livenessProbe:
             httpGet:
-              path: /
-              port: 16686
+              path: /status
+              port: 13133
             initialDelaySeconds: 10
             periodSeconds: 10
 ---
@@ -55,14 +65,13 @@ kind: Service
 metadata:
   name: jaeger
 spec:
-  type: NodePort
+  type: ClusterIP
   selector:
     app: jaeger
   ports:
     - name: ui
       port: 16686
       targetPort: 16686
-      nodePort: 31686
     - name: otlp-grpc
       port: 4317
       targetPort: 4317
@@ -70,5 +79,5 @@ spec:
       port: 4318
       targetPort: 4318
     - name: metrics
-      port: 14269
-      targetPort: 14269
+      port: 8888
+      targetPort: 8888

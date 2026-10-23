@@ -1,0 +1,88 @@
+# Unit tests for the alerting and SLO rules. Run in CI with:
+#   promtool test rules k8s/base/monitoring/rules-test.yml
+rule_files:
+  - alert-rules.yml
+  - slo-rules.yml
+
+evaluation_interval: 15s
+
+tests:
+  # Half of Service B's requests fail -> HighErrorRate fires after its 1m "for" window.
+  - interval: 15s
+    input_series:
+      - series: 'http_requests_total{job="service-b",handler="/internal/orders/{order_id}",method="GET",status="5xx"}'
+        values: "0+3x40"
+      - series: 'http_requests_total{job="service-b",handler="/internal/orders/{order_id}",method="GET",status="2xx"}'
+        values: "0+3x40"
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: HighErrorRate
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: HighErrorRate
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: service-b
+            exp_annotations:
+              summary: "High 5xx error rate on service-b"
+              description: "50% of requests to service-b are failing (threshold 5%)."
+
+  # Low traffic (0.1 req/s) must still give the true error ratio, not one squashed toward zero.
+  - interval: 15s
+    input_series:
+      - series: 'http_requests_total{job="service-a",handler="/api/orders/{order_id}",method="GET",status="5xx"}'
+        values: "0+0.75x80"
+      - series: 'http_requests_total{job="service-a",handler="/api/orders/{order_id}",method="GET",status="2xx"}'
+        values: "0+0.75x80"
+      - series: 'http_request_duration_seconds_bucket{job="service-a",handler="/api/orders/{order_id}",method="GET",le="0.3"}'
+        values: "0+0.75x80"
+      - series: 'http_request_duration_seconds_count{job="service-a",handler="/api/orders/{order_id}",method="GET"}'
+        values: "0+1.5x80"
+    promql_expr_test:
+      - expr: slo:service_a:availability_error_ratio:rate5m
+        eval_time: 10m
+        exp_samples:
+          - labels: "slo:service_a:availability_error_ratio:rate5m"
+            value: 0.5
+      - expr: slo:service_a:latency_bad_ratio:rate5m
+        eval_time: 10m
+        exp_samples:
+          - labels: "slo:service_a:latency_bad_ratio:rate5m"
+            value: 0.5
+
+  # No 5xx series exists yet -> the ratio is 0 and the full budget remains (not "no data").
+  - interval: 15s
+    input_series:
+      - series: 'http_requests_total{job="service-a",handler="/api/orders/{order_id}",method="GET",status="2xx"}'
+        values: "0+3x80"
+    promql_expr_test:
+      - expr: slo:service_a:availability_error_ratio:rate5m
+        eval_time: 10m
+        exp_samples:
+          - labels: "slo:service_a:availability_error_ratio:rate5m"
+            value: 0
+      - expr: slo:service_a:error_budget_remaining:30d
+        eval_time: 10m
+        exp_samples:
+          - labels: "slo:service_a:error_budget_remaining:30d"
+            value: 1
+
+  # Every request fails -> fast burn pages; slow burn is still waiting for its 15m window.
+  - interval: 15s
+    input_series:
+      - series: 'http_requests_total{job="service-a",handler="/api/orders/{order_id}",method="GET",status="5xx"}'
+        values: "0+3x80"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: SLOFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: service-a
+            exp_annotations:
+              summary: "Service A is burning its error budget fast"
+              description: "At this rate the 30-day error budget is gone in about 2 days."
+      - eval_time: 10m
+        alertname: SLOSlowBurn
+        exp_alerts: []

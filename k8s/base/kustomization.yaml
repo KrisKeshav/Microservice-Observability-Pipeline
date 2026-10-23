@@ -1,26 +1,45 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
+# Everything one environment needs. Overlays set the namespace, image tags and per-env tweaks.
+# Secrets (app-secrets, postgres-secret) are NOT here: scripts/bootstrap.ps1 creates them per cluster.
 resources:
-  - secrets/app-secret.yaml
-  - postgres/configmap.yaml
-  - postgres/secret.yaml
-  - postgres/pvc.yaml
-  - postgres/deployment.yaml
-  - postgres/service.yaml
+  - postgres/postgres.yaml
+  - services/service-a.yaml
+  - services/service-b.yaml
   - services/service-c.yaml
   - services/service-c-hpa.yaml
-  - services/service-b.yaml
-  - services/service-a.yaml
   - services/anomaly-detector.yaml
   - kafka/kafka.yaml
-  - logging/loki.yaml
   - logging/fluent-bit-shipper.yaml
   - logging/fluent-bit-consumer.yaml
+  - logging/loki.yaml
   - logging/grafana.yaml
   - tracing/jaeger.yaml
-  - monitoring/alert-rules.yaml
-  - monitoring/slo-rules.yaml
   - monitoring/prometheus.yaml
   - monitoring/alertmanager.yaml
   - monitoring/kafka-exporter.yaml
+
+# Config files become ConfigMaps with a content-hash suffix, so changing a file
+# automatically rolls the pods that use it.
+configMapGenerator:
+  - name: postgres-init-sql
+    files: [postgres/init.sql]
+  - name: fluent-bit-shipper-config
+    files: [fluent-bit.conf=logging/fluent-bit-shipper.conf]
+  - name: fluent-bit-consumer-config
+    files: [fluent-bit.conf=logging/fluent-bit-consumer.conf]
+  - name: loki-config
+    files: [logging/loki-config.yaml]
+  - name: grafana-datasources
+    files: [logging/grafana-datasources.yaml]
+  - name: grafana-dashboard-provider
+    files: [logging/grafana-dashboard-provider.yaml]
+  - name: grafana-dashboards
+    files: [logging/observability-dashboard.json]
+  - name: prometheus-config
+    files: [monitoring/prometheus.yml]
+  - name: prometheus-rules
+    files: [monitoring/alert-rules.yml, monitoring/slo-rules.yml]
+  - name: alertmanager-config
+    files: [monitoring/alertmanager.yml]

@@ -1,38 +1,17 @@
-# Full-Pipeline Kubernetes Load Test Automation
+# Load test against the dev environment, then show what the anomaly detector recorded.
+param(
+    [string]$TargetHost = "http://127.0.0.1:30080",
+    [int]$Users = 50,
+    [string]$Duration = "60s"
+)
 
-$targetHost = "http://127.0.0.1:30080"
-$users = 100
-$spawnRate = 20
-$duration = "45s"
+Write-Host "=== Load test: $Users users for $Duration against $TargetHost ===" -ForegroundColor Cyan
+locust -f "$PSScriptRoot/locustfile.py" --headless -u $Users -r 10 --run-time $Duration --host $TargetHost --only-summary
 
-Write-Host "=== Checking Kubernetes Cluster Health ===" -ForegroundColor Cyan
-if (Get-Command kubectl -ErrorAction SilentlyContinue) {
-    $pods = kubectl get pods --no-headers 2>&1
-    Write-Host "$pods"
-} else {
-    Write-Host "kubectl not found in PATH, skipping pod status check." -ForegroundColor Yellow
-}
+Write-Host "`n=== Waiting 20s for logs to flow through Kafka and the anomaly detector ===" -ForegroundColor Cyan
+Start-Sleep -Seconds 20
 
-Write-Host "`n=== Launching Locust Load Test ($users Users against $targetHost) ===" -ForegroundColor Cyan
-Push-Location "$PSScriptRoot"
-try {
-    locust -f locustfile.py --headless -u $users -r $spawnRate --run-time $duration --host $targetHost
-} catch {
-    Write-Host "Failed to run locust command. Ensure locust is installed in python environment." -ForegroundColor Red
-}
-Pop-Location
+Write-Host "`n=== Latest anomaly alerts (dev) ===" -ForegroundColor Cyan
+kubectl exec -n dev statefulset/postgres -- sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT detected_at, error_count, total_count, round(error_rate::numeric, 2) AS error_rate FROM anomaly_alerts ORDER BY id DESC LIMIT 5;"'
 
-Write-Host "`n=== Waiting 10s for Telemetry Pipeline & Kafka Consumers to Flush ===" -ForegroundColor Cyan
-Start-Sleep -Seconds 10
-
-Write-Host "`n=== Checking Database Anomaly Alerts (PostgreSQL) ===" -ForegroundColor Cyan
-if (Get-Command kubectl -ErrorAction SilentlyContinue) {
-    try {
-        kubectl exec deploy/postgres -- psql -U orders -c "SELECT id, detected_at, error_count, total_count, error_rate FROM anomaly_alerts ORDER BY id DESC LIMIT 5;"
-    } catch {
-        Write-Host "Could not query anomaly_alerts table directly via kubectl." -ForegroundColor Yellow
-    }
-}
-
-Write-Host "`n=== Load Test Complete ===" -ForegroundColor Green
-Write-Host "Open Grafana at http://127.0.0.1:30300 to inspect correlated logs and Jaeger traces." -ForegroundColor Green
+Write-Host "`nOpen Grafana at http://127.0.0.1:30300 to follow a failing request from metrics to logs to traces." -ForegroundColor Green

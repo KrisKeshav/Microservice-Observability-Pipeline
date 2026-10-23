@@ -1,16 +1,9 @@
+# Usage: docker compose -f compose.yaml -f loadtest/docker-compose.loadtest.yaml up locust
 services:
   locust:
     image: locustio/locust:2.32.4
     volumes:
-      - ./locustfile.py:/mnt/locust/locustfile.py:ro
-    command: >
-      -f /mnt/locust/locustfile.py
-      --headless
-      -u 50 -r 10
-      --run-time 30s
-      --host http://service-a:8000
-      --only-summary
+      - ./loadtest/locustfile.py:/mnt/locust/locustfile.py:ro
+    command: -f /mnt/locust/locustfile.py --headless -u 50 -r 10 --run-time 30s --host http://service-a:8000 --only-summary
     depends_on:
-      service-a:
-        condition: service_healthy
-    network_mode: "service:service-a"
+      service-a: {condition: service_healthy}

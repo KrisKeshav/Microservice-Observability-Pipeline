@@ -1,0 +1,30 @@
+# Keep at least one pod of each request-path service running during node drains and upgrades.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: service-a
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: service-a
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: service-b
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: service-b
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: service-c
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: service-c

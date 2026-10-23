@@ -9,3 +9,22 @@ resources:
 labels:
   - pairs:
       environment: dev
+
+# CI rewrites every newTag below to the commit SHA it just built, scanned and pushed.
+images:
+  - name: service-a
+    newName: ghcr.io/kriskeshav/microservice-observability-pipeline/service-a
+    newTag: initial
+  - name: service-b
+    newName: ghcr.io/kriskeshav/microservice-observability-pipeline/service-b
+    newTag: initial
+  - name: service-c
+    newName: ghcr.io/kriskeshav/microservice-observability-pipeline/service-c
+    newTag: initial
+  - name: anomaly-detector
+    newName: ghcr.io/kriskeshav/microservice-observability-pipeline/anomaly-detector
+    newTag: initial
+
+patches:
+  - path: patches/nodeports.yaml
+  - path: patches/fault-injection.yaml

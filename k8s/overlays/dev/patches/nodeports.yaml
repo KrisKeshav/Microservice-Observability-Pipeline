@@ -1,0 +1,61 @@
+# Dev only: fixed NodePorts so the UIs are reachable from the laptop.
+# Prod keeps ClusterIP services (use kubectl port-forward), so the two never collide.
+apiVersion: v1
+kind: Service
+metadata:
+  name: service-a
+spec:
+  type: NodePort
+  ports:
+    - port: 8000
+      nodePort: 30080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+spec:
+  type: NodePort
+  ports:
+    - port: 3000
+      nodePort: 30300
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+spec:
+  type: NodePort
+  ports:
+    - port: 9090
+      nodePort: 30090
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+spec:
+  type: NodePort
+  ports:
+    - port: 9093
+      nodePort: 30093
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger
+spec:
+  type: NodePort
+  ports:
+    - port: 16686
+      nodePort: 31686
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki
+spec:
+  type: NodePort
+  ports:
+    - port: 3100
+      nodePort: 30100

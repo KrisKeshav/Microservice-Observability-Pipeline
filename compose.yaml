@@ -1,103 +1,61 @@
+# Fast local loop for the request path only (A -> B -> C -> Postgres, traces in Jaeger).
+# The full pipeline (Kafka, Fluent Bit, Loki, Prometheus, anomaly detector) runs on Kubernetes.
+# Local-only credentials; real environments get generated secrets from scripts/bootstrap.ps1.
+x-healthcheck: &healthcheck
+  test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready')"]
+  interval: 5s
+  timeout: 3s
+  retries: 10
+
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16.9-alpine
     environment:
       POSTGRES_USER: orders
       POSTGRES_PASSWORD: orders
       POSTGRES_DB: orders
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    ports:
-      - "5432:5432"
+      - ./k8s/base/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U orders"]
       interval: 3s
-      timeout: 3s
       retries: 10
-      start_period: 5s
 
   jaeger:
-    image: jaegertracing/all-in-one:latest
-    environment:
-      - COLLECTOR_OTLP_ENABLED=true
+    image: jaegertracing/jaeger:2.5.0
     ports:
       - "16686:16686"
-      - "4317:4317"
-      - "4318:4318"
 
   service-c:
-    build:
-      context: .
-      dockerfile: services/service_c/Dockerfile
+    build: {context: ., args: {SERVICE: service_c}}
     environment:
       DATABASE_URL: postgresql://orders:orders@postgres:5432/orders
-      DB_POOL_SIZE: "3"
-      DB_POOL_ACQUIRE_TIMEOUT: "0.5"
+      FAULT_INJECTION_ENABLED: "true"
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     depends_on:
-      postgres:
-        condition: service_healthy
-      jaeger:
-        condition: service_started
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-      start_period: 5s
+      postgres: {condition: service_healthy}
+    healthcheck: *healthcheck
 
   service-b:
-    build:
-      context: .
-      dockerfile: services/service_b/Dockerfile
+    build: {context: ., args: {SERVICE: service_b}}
     environment:
       SERVICE_C_URL: http://service-c:8000
-      SERVICE_C_TIMEOUT_SECONDS: "5"
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     depends_on:
-      service-c:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-      start_period: 5s
+      service-c: {condition: service_healthy}
+    healthcheck: *healthcheck
 
   service-a:
-    build:
-      context: .
-      dockerfile: services/service_a/Dockerfile
+    build: {context: ., args: {SERVICE: service_a}}
     environment:
       SERVICE_B_URL: http://service-b:8000
-      SERVICE_B_TIMEOUT_SECONDS: "5"
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     depends_on:
-      service-b:
-        condition: service_healthy
+      service-b: {condition: service_healthy}
     ports:
       - "8000:8000"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-      start_period: 5s
-
-  anomaly-detector:
-    build:
-      context: .
-      dockerfile: services/anomaly_detector/Dockerfile
-    environment:
-      DATABASE_URL: postgresql://orders:orders@postgres:5432/orders
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      ANOMALY_WINDOW_SEC: "60"
-      ANOMALY_THRESHOLD: "5"
-    depends_on:
-      postgres:
-        condition: service_healthy
-
+    healthcheck: *healthcheck
 
 volumes:
   pgdata:

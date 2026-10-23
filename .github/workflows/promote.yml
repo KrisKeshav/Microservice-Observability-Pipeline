@@ -1,0 +1,36 @@
+name: Promote to prod
+
+# Manual promotion: copy the image tag currently running in dev into the prod overlay
+# and open a pull request. Merging the PR is the approval; Argo CD then syncs prod.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Open promotion pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=$(grep -m1 'newTag:' k8s/overlays/dev/kustomization.yaml | awk '{print $2}')
+          BRANCH="promote/${TAG::7}"
+          sed -i "s/newTag: .*/newTag: ${TAG}/" k8s/overlays/prod/kustomization.yaml
+          if git diff --quiet; then
+            echo "Prod already runs ${TAG}; nothing to promote."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git commit -am "deploy(prod): promote ${TAG::7}"
+          git push origin "$BRANCH"
+          gh pr create --base main --head "$BRANCH" \
+            --title "Promote ${TAG::7} to prod" \
+            --body "Promotes the images currently running in dev (\`${TAG}\`) to prod. Merge to deploy; revert to roll back."

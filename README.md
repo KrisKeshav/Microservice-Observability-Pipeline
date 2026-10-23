@@ -1,309 +1,131 @@
 # Microservice Observability Pipeline
 
-A production-grade, distributed microservice telemetry pipeline built with **FastAPI**, **Kubernetes**, **Apache Kafka**, **Fluent Bit**, **Grafana Loki**, **Jaeger**, and **Grafana**. 
+A learning project. Three small Python services run on Kubernetes, and around them I built the
+tools you need to see what they are doing and to notice when they break:
 
-Demonstrates end-to-end request correlation, distributed tracing across microservices, streaming log telemetry, real-time anomaly detection, and deterministic failure injection under load.
+- **Logs** collected from every pod, buffered in Kafka, searchable in Loki
+- **Traces** that follow one request through all three services (Jaeger)
+- **Metrics and alerts** (Prometheus, Alertmanager), including SLOs and error budgets
+- **A circuit breaker** so one failing service does not drag down the others
+- **CI/CD with GitOps**: GitHub Actions builds and scans images, Argo CD deploys them
+- **Drills** that break things on purpose and measure what happens
 
----
+The services do very little on purpose. The interesting part is everything around them.
 
-## 🏗️ System Architecture
+```
+Client ─▶ Service A ─▶ Service B ─▶ Service C ─▶ Postgres
+          (gateway)    (circuit     (database
+                        breaker)     access)
 
-### 1. HTTP Microservice Request Flow
-
-```mermaid
-flowchart LR
-    Client([Client / Load Test]) -->|HTTP GET / POST| SA[Service A :8000]
-    SA -->|HTTP /internal/orders| SB[Service B :8001]
-    SB -->|HTTP /internal/validate| SC[Service C :8002]
-    SC -->|asyncpg pool max_size=3| DB[(PostgreSQL)]
-
-    style SA fill:#1f2937,stroke:#3b82f6,stroke-width:2px,color:#fff
-    style SB fill:#1f2937,stroke:#3b82f6,stroke-width:2px,color:#fff
-    style SC fill:#1f2937,stroke:#ef4444,stroke-width:2px,color:#fff
-    style DB fill:#111827,stroke:#10b981,stroke-width:2px,color:#fff
+Logs:    every pod ─▶ Fluent Bit ─▶ Kafka ─▶ Fluent Bit ─▶ Loki ─▶ Grafana
+                                      └────▶ Anomaly detector ─▶ Alertmanager
+Traces:  A, B, C ─▶ Jaeger
+Metrics: Prometheus scrapes every pod ─▶ alert rules ─▶ Alertmanager ─▶ Slack
 ```
 
-* **Service A**: API Gateway facing clients. Injects or forwards `X-Request-ID`.
-* **Service B**: Business logic coordinator.
-* **Service C**: Data access service connected to PostgreSQL via an intentionally tiny connection pool (`DB_POOL_SIZE=3`).
+## What has actually been tested
 
----
+I want this README to be honest about what is proven and what is only designed.
 
-### 2. Telemetry & Data Streaming Pipeline
+| Feature | Status | How it was checked |
+|---|---|---|
+| Unit tests (62) and lint | ✅ Passing | `pytest`, `ruff` |
+| Alert and SLO rules | ✅ Passing | `promtool test rules` with fake traffic (see `docs/SLO.md`) |
+| No known vulnerable Python packages | ✅ Passing | `pip-audit` locally (it found Starlette CVEs, fixed by upgrading) |
+| Image scan | ✅ Passing | Trivy locally on the Service A image: no fixable HIGH/CRITICAL findings |
+| Request path + tracing with Docker Compose | ✅ Works | One request produced one trace with 14 spans across A, B, C and the SQL queries |
+| Full stack on Kubernetes (minikube) | ✅ Works | All pods ran with the hardened settings; all Prometheus targets up; all 26 rules loaded |
+| Log line → Loki → its trace in Jaeger | ✅ Works | `scripts/canary_watchdog.py` |
+| Circuit breaker, pod kill, DB pool, log buffering | ✅ Measured | `scripts/chaos_drill.py`; results in `docs/RUNBOOK.md` |
+| Anomaly detector | ✅ Works | Wrote 2 alerts to Postgres during the drills |
+| GitHub Actions pipeline (`ci.yml`, `promote.yml`) | ⏳ Not run yet | Needs a push to GitHub |
+| Argo CD deploying the new manifests | ⏳ Not run yet | Needs the CI images to exist |
+| dev and prod running side by side | ⏳ Not run yet | Checked only by rendering the manifests |
+| Slack notifications | ⏳ Not tested | No Slack webhook configured |
 
-```mermaid
-flowchart TD
-    subgraph Cluster ["Kubernetes Cluster"]
-        subgraph Microservices ["FastAPI Pods"]
-            SA[Service A]
-            SB[Service B]
-            SC[Service C]
-        end
+The Kubernetes test ran the base manifests plus the dev fault-injection setting in a temporary
+namespace, with locally built images. To fit on my laptop I lowered the CPU *requests* and
+limited Service C to one replica during the test. That changes scheduling, not behaviour.
+The Kubernetes run used images built *before* the security upgrade (FastAPI/Starlette); after the
+upgrade I re-ran the unit tests and the Compose trace check, not the Kubernetes drills.
 
-        subgraph LogCollection ["Log Shipping & Ingestion"]
-            FBS["Fluent Bit Shipper\n(DaemonSet)"]
-            Kafka{{"Apache Kafka\n(Topic: app-logs)"}}
-            FBC["Fluent Bit Consumer\n(Deployment)"]
-            Loki[(Grafana Loki)]
-        end
+## Repository layout
 
-        subgraph Tracing ["Distributed Tracing"]
-            OTEL[OpenTelemetry SDK]
-            Jaeger[(Jaeger Tracing)]
-        end
-
-        subgraph Alerting ["Stream Processing & Alerts"]
-            AD["Anomaly Detector\n(Kafka Consumer)"]
-            PG[(PostgreSQL)]
-        end
-    end
-
-    subgraph Observability ["Unified Monitoring"]
-        Grafana[Grafana Dashboard]
-    end
-
-    SA -.->|stdout JSON logs| FBS
-    SB -.->|stdout JSON logs| FBS
-    SC -.->|stdout JSON logs| FBS
-
-    SA -.->|OTLP gRPC| OTEL
-    SB -.->|OTLP gRPC| OTEL
-    SC -.->|OTLP gRPC| OTEL
-    OTEL --> Jaeger
-
-    FBS -->|Publish| Kafka
-    Kafka -->|Group: loki-consumer| FBC
-    Kafka -->|Group: anomaly-detector| AD
-    FBC -->|Ship logs| Loki
-    AD -->|Record alerts| PG
-
-    Loki -->|Log Streams| Grafana
-    Jaeger -->|Trace Graphs| Grafana
-    PG -->|Alert Table| Grafana
+```
+services/            service_a, service_b, service_c, anomaly_detector (FastAPI apps)
+common/              shared code: logging, tracing, metrics, circuit breaker, database
+k8s/base/            all Kubernetes manifests and config files for one environment
+k8s/overlays/dev     dev settings: image tags (written by CI), NodePorts, fault injection on
+k8s/overlays/prod    prod settings: image tags (written by promotion PR), 2 replicas, PDBs
+k8s/argocd/          Argo CD Applications, one per environment
+scripts/             bootstrap.ps1, canary_watchdog.py, chaos_drill.py
+.github/workflows/   ci.yml (build, test, scan, deploy to dev), promote.yml (dev → prod)
+docs/                ARCHITECTURE, RUNBOOK, SLO, SECURITY
 ```
 
----
+## Run it
 
-## 💡 Why Each Tool?
-
-| Component | Technology | Purpose & Technical Rationale |
-| :--- | :--- | :--- |
-| **Log Buffer** | **Apache Kafka** | High-throughput broker providing backpressure decoupling. Allows fan-out streaming so multiple consumers (Loki shipper & anomaly detector) ingest logs independently without touching microservice containers. |
-| **Log Shipper** | **Fluent Bit** | Lightweight C-based log agent (~few MB RAM vs Logstash's 500MB+). DaemonSet tails pod container logs, enriches with Kubernetes pod metadata, and publishes to Kafka. |
-| **Log Storage** | **Grafana Loki** | Index-free log aggregation engine. Indexes metadata labels only, minimizing storage overhead while supporting flexible LogQL filtering by `request_id` or `levelname`. |
-| **Distributed Tracing** | **Jaeger & OpenTelemetry** | Standardized OTLP gRPC instrumentation across HTTP calls and SQL queries. Visualizes microservice span graphs and execution latencies. |
-| **Single Pane Visualizer** | **Grafana** | Centralized dashboard integrating Loki log streams, PostgreSQL alert tables, log-rate time series metrics, and 1-click derived field links into Jaeger traces. |
-| **Deterministic Failure** | **asyncpg (Pool = 3)** | Service C limits database connection pool size to 3. Under load, connection pool contention triggers real `503 Service Unavailable` failures and cascading HTTP timeouts without relying on artificial dice rolls. |
-
----
-
-## ⚡ Quick Start
-
-### Prerequisites
-* Docker Desktop or Minikube
-* `kubectl` CLI
-* Python 3.10+ (for running load tests locally)
-
-### Option A: Deploy on Kubernetes (Recommended)
+### Option 1: Docker Compose (request path and traces only)
 
 ```powershell
-# 1. Build container images and apply all Kubernetes manifests
-.\k8s\deploy.ps1
-
-# 2. Verify rollout status
-kubectl get pods,svc
+docker compose up --build
+curl http://localhost:8000/api/orders/demo-1
+# open http://localhost:16686 (Jaeger) to see the trace
 ```
 
-Access endpoints:
-* **Service A (API Gateway)**: `http://127.0.0.1:30080` (or `kubectl port-forward svc/service-a 8000:8000`)
-* **Grafana Dashboard**: [http://127.0.0.1:30300](http://127.0.0.1:30300) (User: `admin` / Password: `admin`)
-* **Jaeger UI**: [http://127.0.0.1:31686](http://127.0.0.1:31686)
-* **Prometheus**: `http://127.0.0.1:30090` (or `kubectl port-forward svc/prometheus 9090:9090`)
-* **Alertmanager**: `http://127.0.0.1:30093` (or `kubectl port-forward svc/alertmanager 9093:9093`)
+### Option 2: Kubernetes with Argo CD (the intended setup)
 
-### Option B: Deploy with Docker Compose
+This is the designed flow. It has not been run end to end yet (see the table above).
 
-```powershell
-# Build and start all services
-docker compose up --build -d
-
-# Check health status
-docker compose ps
-```
-
-> **Note:** Docker Compose does not yet have metrics/alerting support. Use Kubernetes for the full Sprint 2 experience.
-
----
-
-## 📊 Monitoring, Metrics & Alerting (Sprint 2)
-
-### Prometheus Metrics
-
-All services expose `/metrics` endpoints instrumented with `prometheus-fastapi-instrumentator`:
-
-| Metric | Type | Description |
-| :--- | :--- | :--- |
-| `http_requests_total` | Counter | Total requests by service, method, status |
-| `http_request_duration_seconds` | Histogram | Request latency distribution (p50/p95/p99) |
-| `db_pool_active` | Gauge | Service C active DB connections |
-| `db_pool_max` | Gauge | Service C max pool capacity |
-
-### RED Dashboards
-
-The Grafana dashboard includes per-service RED panels:
-- **Rate**: `sum by (service) (rate(http_requests_total[1m]))`
-- **Errors**: `sum by (service) (rate(http_requests_total{status=~"5.."}[1m]))`
-- **Duration**: `histogram_quantile(0.95, ...)` p95 latency
-
-### Meta-Monitoring
-
-Prometheus also scrapes the observability infrastructure itself:
-- **Kafka Exporter**: Consumer group lag for `loki-consumer` and `anomaly-detector`
-- **Fluent Bit**: Buffer/retry rates for shipper and consumer
-- **Loki**: `/metrics` endpoint on port 3100
-- **Jaeger**: Admin metrics on port 14269
-
-### Alert Rules
-
-| Alert | Condition | Severity |
-| :--- | :--- | :--- |
-| `HighErrorRate` | >10% 5xx rate for 2 minutes | critical |
-| `DBPoolExhausted` | `db_pool_active >= db_pool_max` for 1 minute | critical |
-| `KafkaConsumerLagHigh` | Consumer lag >1000 for 5 minutes | warning |
-
-Alerts fire through **Alertmanager** → **Slack** via the `SLACK_WEBHOOK_URL` secret.
-
----
-
-## 🐕 On-Demand Canary Watchdog & End-to-End Demo Flow
-
-The repository includes an on-demand canary watchdog script ([`scripts/canary_watchdog.py`](file:///c:/Users/krish/OneDrive/Desktop/MyProject/scripts/canary_watchdog.py)) that queries Loki and Jaeger to verify that end-to-end logs and traces are flowing cleanly.
-
-> [!NOTE]
-> Always-on scheduling was intentionally descoped for this local development environment, as running an unattended background task on a personal machine introduces unnecessary false alarms and OS-level debugging overhead; in a production deployment, this would run as a lightweight external cron, sidecar, or uptime-check service rather than an OS-level scheduled task.
-
-### Running the Watchdog On-Demand
-
-```powershell
-.venv\Scripts\python.exe .\scripts\canary_watchdog.py
-```
-
-The script performs a reachability precheck first, queries Loki for recent logs, queries Jaeger for recent traces, and emits a Slack notification if pipeline degradation is detected.
-
-### Recommended Demo Flow (Detect → Alert → Trace)
-
-To demonstrate the full observability and alerting lifecycle in action:
-
-1. **Trigger Load & Faults**: Run the automated Locust load test against the cluster:
+1. Push to `main`. CI builds the four images, tags them with the commit SHA and pushes them to
+   GitHub Container Registry. Then it writes that tag into `k8s/overlays/dev/kustomization.yaml`.
+2. Make the four packages public in GitHub (Packages → settings) so minikube can pull them.
+3. Prepare the cluster:
    ```powershell
-   .\loadtest\full_pipeline_test.ps1
+   minikube start --cpus 4 --memory 8192
+   minikube addons enable metrics-server     # the autoscaler needs CPU metrics
+   .\scripts\bootstrap.ps1                   # creates the dev namespace, random secrets, Argo CD app
    ```
-2. **Observe Real-Time RED Metrics**: Open Grafana at [http://127.0.0.1:30300](http://127.0.0.1:30300) and watch the RED method panels spike as Service C's 3-connection database pool exhausts (`db_pool_active >= db_pool_max`).
-3. **Confirm Alertmanager & Slack Notification**: Check Alertmanager at [http://127.0.0.1:30093](http://127.0.0.1:30093) to see `DBPoolExhausted` and `HighErrorRate` alerts trigger and dispatch notifications to Slack.
-4. **Inspect Correlated Trace in Jaeger**: From the unified log stream in Grafana, click the `TraceID` link on any failed log line to navigate directly to the Jaeger waterfall trace ([http://127.0.0.1:31686](http://127.0.0.1:31686)) and isolate the root-cause database query timeout.
-5. **Verify Telemetry Pipeline**: Run the watchdog script to validate end-to-end telemetry ingestion:
-   ```powershell
-   .venv\Scripts\python.exe .\scripts\canary_watchdog.py
-   ```
+   Argo CD must already be installed (the script prints the install command if not).
+4. Argo CD syncs `k8s/overlays/dev` from GitHub.
+5. To release to prod: run `.\scripts\bootstrap.ps1 -Environments prod` once, then run the
+   **Promote to prod** workflow in GitHub Actions and merge the pull request it opens.
+   (Repo setting needed: *Actions → Allow GitHub Actions to create pull requests*.)
 
----
-
-## 🧪 Scenarios & Failure Injection
-
-Trigger deterministic request behaviors using HTTP headers:
+To open the UIs, use port-forwarding (this is what I used in testing):
 
 ```powershell
-# 1. Successful request chain
-curl.exe -i -H "X-Request-ID: demo-success-001" -H "X-Demo-Scenario: success" http://127.0.0.1:30080/api/orders/42
-
-# 2. Forced validation error (Service C raises 500 -> B returns 502 -> A returns 502)
-curl.exe -i -H "X-Request-ID: demo-error-001" -H "X-Demo-Scenario: error" http://127.0.0.1:30080/api/orders/42
-
-# 3. Cascading timeout (Service C runs pg_sleep(2) -> B times out -> A returns 504)
-curl.exe -i -H "X-Request-ID: demo-timeout-001" -H "X-Demo-Scenario: slow" http://127.0.0.1:30080/api/orders/42
+kubectl port-forward -n dev svc/service-a 30080:8000
+kubectl port-forward -n dev svc/grafana 30300:3000      # login: admin / password printed by bootstrap
+kubectl port-forward -n dev svc/prometheus 30090:9090
+kubectl port-forward -n dev svc/alertmanager 30093:9093
+kubectl port-forward -n dev svc/jaeger 31686:16686
+kubectl port-forward -n dev svc/loki 30100:3100
 ```
 
----
-
-## 🚀 Load Testing (Full Pipeline)
-
-Run Locust against the Kubernetes cluster to trigger database connection pool exhaustion across the entire stack:
+### Check that it works
 
 ```powershell
-# Execute automated load test against K8s cluster
-.\loadtest\full_pipeline_test.ps1
+.venv\Scripts\python scripts\canary_watchdog.py              # one request, followed through logs and traces
+.venv\Scripts\python scripts\chaos_drill.py --scenario all   # the four drills (dev only)
 ```
 
-Or execute directly with Locust:
+## Development
 
 ```powershell
-pip install -r requirements.txt
-cd loadtest
-locust -f locustfile.py --headless -u 100 -r 20 --run-time 45s --host http://127.0.0.1:30080
+python -m venv .venv; .venv\Scripts\pip install -r requirements-dev.txt
+$env:OTEL_SDK_DISABLED="true"; .venv\Scripts\python -m pytest
+.venv\Scripts\python -m ruff check .
+kubectl kustomize k8s/overlays/dev          # see the final Kubernetes YAML
 ```
 
-### Expected Behavior Under Load
-Under 100 concurrent users, Service C's 3-connection database pool exhausts. You will observe:
-1. `Service C` emitting JSON logs with `"event": "db_pool_exhausted"`.
-2. `Service A` and `Service B` logging downstream HTTP timeout/failure errors.
-3. `Anomaly Detector` catching error spikes over sliding 60s windows and writing entries to `anomaly_alerts`.
-4. **Alertmanager** firing `HighErrorRate` and `DBPoolExhausted` alerts → Slack notifications.
-5. Grafana displaying error spikes, DB pool saturation, and Kafka consumer lag.
+## Limitations (known and accepted for a learning project)
 
----
+- One instance each of Kafka, Loki and Postgres. If one fails, that part stops until Kubernetes restarts it.
+- Jaeger keeps traces in memory only; a restart loses them.
+- dev and prod are namespaces in one laptop cluster. A company would use separate clusters.
+- Each environment runs its own copy of the monitoring tools, which is simple but wasteful.
+- Secrets are created by a script, not by a secret manager such as Vault.
+- No network policies, no encryption between services, Prometheus itself is not monitored.
 
-## 🔍 Failure Tracing Walkthrough
-
-1. Open **Grafana** at [http://127.0.0.1:30300](http://127.0.0.1:30300).
-2. Enter a failed request ID (e.g. `demo-timeout-001` or a `loadtest-` ID) into the **Request ID Filter** text box.
-3. View the correlated logs across `service-a`, `service-b`, and `service-c` in sequential order.
-4. Expand any log entry and click **View Trace in Jaeger** (or **TraceID**).
-5. Grafana jumps directly into the matching Jaeger distributed trace, rendering the 4-tier span waterfall: `service-a` -> `service-b` -> `service-c` -> `asyncpg query`.
-
----
-
-## 📁 Repository Structure
-
-```text
-.
-├── common/                     # Shared telemetry & database libraries
-│   ├── database.py             # asyncpg connection pool, SQL queries & pool metrics
-│   ├── logging.py              # Python JSON log formatter with trace context
-│   └── tracing.py              # OpenTelemetry OTLP setup
-├── services/                   # Microservice applications
-│   ├── service_a/              # API Gateway (Port 8000)
-│   ├── service_b/              # Orchestrator (Port 8001)
-│   ├── service_c/              # Data Access & DB Pool (Port 8002)
-│   └── anomaly_detector/       # Kafka Stream Consumer & Anomaly Alerting
-├── scripts/                    # Operational scripts
-│   └── canary_watchdog.py      # On-demand telemetry pipeline verifier
-├── k8s/                        # Kubernetes Manifests (Kustomize)
-│   ├── kafka/                  # Kafka broker manifest (KRaft mode)
-│   ├── logging/                # Fluent Bit, Loki, & Grafana manifests
-│   ├── monitoring/             # Prometheus, Alertmanager, Kafka Exporter, Alert Rules
-│   ├── postgres/               # PostgreSQL DB deployment & secrets
-│   ├── secrets/                # Secret management (Sealed Secrets / External Secrets)
-│   ├── services/               # Microservice deployments & services
-│   ├── tracing/                # Jaeger tracing deployment
-│   ├── kustomization.yaml      # Master Kustomize file
-│   └── deploy.ps1              # K8s build & deployment script
-├── loadtest/                   # Load testing tools
-│   ├── locustfile.py           # Locust test script with scenario mixing
-│   └── full_pipeline_test.ps1  # Automated load test execution script
-├── docs/                       # Architecture & operational runbooks
-│   ├── ARCHITECTURE.md         # Comprehensive system design & technical trade-offs
-│   └── FAILURE_TRACE_RUNBOOK.md# Step-by-step incident investigation guide
-├── .github/workflows/          # CI/CD pipelines
-│   └── ci.yml                  # Lint → Test → Build → Scan → Push
-├── compose.yaml                # Docker Compose multi-container setup
-├── requirements.txt            # Python dependencies
-└── README.md                   # Project documentation
-```
-
----
-
-## 📚 Documentation & Runbooks
-
-* 📖 **Architecture & System Design**: Read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for a comprehensive writeup on the problem statement, technical decisions, and component trade-offs.
-* 🛠️ **Failure Tracing Runbook**: Read [`docs/FAILURE_TRACE_RUNBOOK.md`](docs/FAILURE_TRACE_RUNBOOK.md) for step-by-step instructions on diagnosing incidents, examining correlated logs, and inspecting Jaeger traces.
-
+More: [Architecture](docs/ARCHITECTURE.md) · [Runbook](docs/RUNBOOK.md) · [SLOs](docs/SLO.md) · [Security](docs/SECURITY.md)

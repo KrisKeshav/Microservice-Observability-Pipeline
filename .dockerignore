@@ -1,7 +1,7 @@
-.venv/
-__pycache__/
-*.py[cod]
-*.log
-.git/
-.gitignore
-README.md
+# Only requirements.txt, common/ and services/ are needed in the image.
+*
+!requirements.txt
+!common/
+!services/
+**/__pycache__/
+**/*.py[cod]

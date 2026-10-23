@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fluent-bit-consumer
+  labels:
+    app: fluent-bit-consumer
+spec:
+  # No replicas field (defaults to 1), so the chaos drill can scale it to 0
+  # without Argo CD treating that as drift.
+  selector:
+    matchLabels:
+      app: fluent-bit-consumer
+  template:
+    metadata:
+      labels:
+        app: fluent-bit-consumer
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: fluent-bit
+          image: fluent/fluent-bit:4.0.0
+          ports:
+            - containerPort: 2020
+              name: http
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 150m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 2020
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 2020
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: config
+              mountPath: /fluent-bit/etc/
+      volumes:
+        - name: config
+          configMap:
+            name: fluent-bit-consumer-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fluent-bit-consumer
+spec:
+  type: ClusterIP
+  selector:
+    app: fluent-bit-consumer
+  ports:
+    - name: metrics
+      port: 2020
+      targetPort: 2020

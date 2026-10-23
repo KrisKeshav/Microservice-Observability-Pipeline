@@ -31,12 +31,16 @@ def _get_trace_context() -> dict[str, str]:
     return {}
 
 
-def log_event(logger: logging.Logger, event: str, request_id: str, **fields: object) -> None:
+def log_event(
+    logger: logging.Logger, event: str, request_id: str, level: int = logging.INFO, **fields: object
+) -> None:
     extra = {"event": event, "request_id": request_id, **_get_trace_context(), **fields}
-    logger.info(event, extra=extra)
+    logger.log(level, event, extra=extra)
+
+
+def log_warning(logger: logging.Logger, event: str, request_id: str, **fields: object) -> None:
+    log_event(logger, event, request_id, level=logging.WARNING, **fields)
 
 
 def log_error(logger: logging.Logger, event: str, request_id: str, **fields: object) -> None:
-    extra = {"event": event, "request_id": request_id, **_get_trace_context(), **fields}
-    logger.error(event, extra=extra)
-
+    log_event(logger, event, request_id, level=logging.ERROR, **fields)

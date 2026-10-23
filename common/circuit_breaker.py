@@ -1,11 +1,18 @@
+"""Async circuit breaker: CLOSED -> OPEN -> HALF_OPEN -> CLOSED.
+
+State checks and transitions never await, so they are atomic on the event loop
+and no lock is needed.
+"""
+
 import asyncio
 import enum
+import math
 import time
-from typing import Any, Callable, Coroutine
+from typing import Any, Awaitable, Callable
 
 from prometheus_client import Counter, Gauge
 
-from common.logging import get_logger, log_event
+from common.logging import get_logger, log_event, log_warning
 
 logger = get_logger("circuit-breaker")
 
@@ -22,6 +29,10 @@ class CircuitBreakerOpenException(Exception):
         self.service = service
         self.target = target
         self.retry_after = retry_after
+
+    @property
+    def retry_after_header(self) -> str:
+        return str(max(1, math.ceil(self.retry_after)))
 
 
 CIRCUIT_BREAKER_STATE = Gauge(
@@ -44,109 +55,88 @@ CIRCUIT_BREAKER_TRIPS = Counter(
 
 
 class CircuitBreaker:
-    def __init__(
-        self,
-        service: str,
-        target: str,
-        failure_threshold: int = 3,
-        recovery_timeout: float = 5.0,
-        half_open_success_threshold: int = 1,
-    ):
+    def __init__(self, service: str, target: str, failure_threshold: int = 3, recovery_timeout: float = 5.0):
         self.service = service
         self.target = target
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
-        self.half_open_success_threshold = half_open_success_threshold
+        self.reset()
 
+    def reset(self) -> None:
         self.state = CircuitState.CLOSED
         self.failure_count = 0
-        self.success_count = 0
-        self.last_state_change = time.time()
-        self._lock = asyncio.Lock()
-
+        self.opened_at = 0.0
+        self._probe_in_flight = False
         CIRCUIT_BREAKER_STATE.labels(service=self.service, target=self.target).set(self.state)
 
-    def _update_state(self, new_state: CircuitState, request_id: str | None = None) -> None:
-        old_state = self.state
+    def _set_state(self, new_state: CircuitState, request_id: str | None) -> None:
+        if new_state == self.state:
+            return
         self.state = new_state
-        self.last_state_change = time.time()
-        CIRCUIT_BREAKER_STATE.labels(service=self.service, target=self.target).set(self.state)
-
-        if new_state == CircuitState.OPEN and old_state != CircuitState.OPEN:
+        CIRCUIT_BREAKER_STATE.labels(service=self.service, target=self.target).set(new_state)
+        if new_state == CircuitState.OPEN:
+            self.opened_at = time.monotonic()
             CIRCUIT_BREAKER_TRIPS.labels(service=self.service, target=self.target).inc()
-            log_event(
-                logger,
-                "circuit_tripped",
-                request_id or "system",
-                service=self.service,
-                target=self.target,
-                state="OPEN",
-            )
-        elif new_state == CircuitState.CLOSED and old_state != CircuitState.CLOSED:
-            log_event(
-                logger,
-                "circuit_closed",
-                request_id or "system",
-                service=self.service,
-                target=self.target,
-                state="CLOSED",
-            )
-        elif new_state == CircuitState.HALF_OPEN and old_state != CircuitState.HALF_OPEN:
-            log_event(
-                logger,
-                "circuit_half_open",
-                request_id or "system",
-                service=self.service,
-                target=self.target,
-                state="HALF_OPEN",
-            )
+            log_warning(logger, "circuit_opened", request_id or "system", service=self.service, target=self.target)
+        else:
+            log_event(logger, f"circuit_{new_state.name.lower()}", request_id or "system",
+                      service=self.service, target=self.target)
+
+    def _reject(self, retry_after: float) -> None:
+        CIRCUIT_BREAKER_REJECTIONS.labels(service=self.service, target=self.target).inc()
+        raise CircuitBreakerOpenException(self.service, self.target, retry_after)
+
+    def _before_call(self, request_id: str | None) -> None:
+        if self.state == CircuitState.OPEN:
+            elapsed = time.monotonic() - self.opened_at
+            if elapsed < self.recovery_timeout:
+                self._reject(self.recovery_timeout - elapsed)
+            self._set_state(CircuitState.HALF_OPEN, request_id)
+
+        if self.state == CircuitState.HALF_OPEN:
+            # Only one probe request is allowed through while we test recovery.
+            if self._probe_in_flight:
+                self._reject(1.0)
+            self._probe_in_flight = True
+
+    def _on_success(self, request_id: str | None) -> None:
+        self._probe_in_flight = False
+        self.failure_count = 0
+        self._set_state(CircuitState.CLOSED, request_id)
+
+    def _on_failure(self, request_id: str | None) -> None:
+        self._probe_in_flight = False
+        self.failure_count += 1
+        if self.state == CircuitState.HALF_OPEN or self.failure_count >= self.failure_threshold:
+            self._set_state(CircuitState.OPEN, request_id)
 
     async def call(
         self,
-        func: Callable[..., Coroutine[Any, Any, Any]],
+        func: Callable[..., Awaitable[Any]],
         *args: Any,
         request_id: str | None = None,
-        retries: int = 1,
+        retries: int = 0,
+        retry_on: tuple[type[BaseException], ...] = (),
         backoff_seconds: float = 0.05,
         **kwargs: Any,
     ) -> Any:
-        async with self._lock:
-            now = time.time()
-            if self.state == CircuitState.OPEN:
-                if now - self.last_state_change >= self.recovery_timeout:
-                    self._update_state(CircuitState.HALF_OPEN, request_id)
-                    self.success_count = 0
-                else:
-                    CIRCUIT_BREAKER_REJECTIONS.labels(service=self.service, target=self.target).inc()
-                    retry_after = max(0.1, self.recovery_timeout - (now - self.last_state_change))
-                    raise CircuitBreakerOpenException(self.service, self.target, retry_after)
+        """Run func through the breaker.
 
-        last_exception = None
-        for attempt in range(retries + 1):
-            try:
-                result = await func(*args, **kwargs)
-                await self._on_success(request_id)
-                return result
-            except Exception as exc:
-                last_exception = exc
-                if attempt < retries:
+        Only exceptions listed in retry_on are retried. Retrying timeouts or 5xx
+        responses would add load to a dependency that is already struggling.
+        """
+        self._before_call(request_id)
+        try:
+            for attempt in range(retries + 1):
+                try:
+                    result = await func(*args, **kwargs)
+                    break
+                except retry_on:
+                    if attempt == retries:
+                        raise
                     await asyncio.sleep(backoff_seconds * (2**attempt))
-
-        await self._on_failure(request_id)
-        raise last_exception
-
-    async def _on_success(self, request_id: str | None) -> None:
-        async with self._lock:
-            if self.state == CircuitState.HALF_OPEN:
-                self.success_count += 1
-                if self.success_count >= self.half_open_success_threshold:
-                    self.failure_count = 0
-                    self._update_state(CircuitState.CLOSED, request_id)
-            elif self.state == CircuitState.CLOSED:
-                self.failure_count = 0
-
-    async def _on_failure(self, request_id: str | None) -> None:
-        async with self._lock:
-            self.failure_count += 1
-            if self.state == CircuitState.HALF_OPEN or self.failure_count >= self.failure_threshold:
-                self._update_state(CircuitState.OPEN, request_id)
+        except Exception:
+            self._on_failure(request_id)
+            raise
+        self._on_success(request_id)
+        return result

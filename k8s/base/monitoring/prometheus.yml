@@ -1,0 +1,62 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+  # Application pods are scraped one by one (not through their Service), so every
+  # replica is its own target and counters stay correct when the HPA scales.
+  # Opt in with the pod annotations prometheus.io/scrape and prometheus.io/port.
+  - job_name: kubernetes-pods
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          own_namespace: true
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        regex: "true"
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_phase]
+        regex: Pending|Succeeded|Failed
+        action: drop
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        target_label: job
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+
+  # Single-instance pipeline components are scraped through their Service, so a
+  # missing pod shows up as up == 0 and fires TelemetryServiceDown.
+  - job_name: kafka-exporter
+    static_configs:
+      - targets: ["kafka-exporter:9308"]
+  - job_name: loki
+    static_configs:
+      - targets: ["loki:3100"]
+  - job_name: jaeger
+    static_configs:
+      - targets: ["jaeger:8888"]
+  - job_name: fluent-bit-shipper
+    metrics_path: /api/v1/metrics/prometheus
+    static_configs:
+      - targets: ["fluent-bit-shipper:2020"]
+  - job_name: fluent-bit-consumer
+    metrics_path: /api/v1/metrics/prometheus
+    static_configs:
+      - targets: ["fluent-bit-consumer:2020"]
+  - job_name: alertmanager
+    static_configs:
+      - targets: ["alertmanager:9093"]
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

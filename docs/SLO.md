@@ -1,39 +1,65 @@
-# Service Level Objectives and Error Budgets
+# SLOs and error budgets
 
-This project measures SLOs at the Service A boundary because it is the user-facing API gateway and already exposes RED metrics to Prometheus.
+## Words first
 
-## Objectives
+- **SLI** (indicator): what you measure, e.g. "share of requests that did not fail".
+- **SLO** (objective): the target, e.g. "99% over 30 days".
+- **Error budget:** what the target allows to go wrong. 99% means 1% of requests may fail.
+- **Burn rate:** how fast the budget is being used. 1 = exactly on schedule (the budget lasts
+  30 days); 10 = ten times too fast (the budget is gone in 3 days).
 
-| SLO | Objective | Good events | Error budget |
+## The two SLOs
+
+Measured at Service A, because that is what users talk to.
+
+| SLO | Target over 30 days | Counts as bad | Budget |
 |---|---|---|---|
-| Availability | 99% over a rolling 30 days | Service A HTTP requests that do not return 5xx | 1% of requests; approximately 7.2 hours in a 30-day month if the service is completely unavailable |
-| Order-read latency | 95% over a rolling 30 days | `GET /api/orders/{order_id}` requests completing in 300ms or less | 5% of requests may exceed 300ms |
+| Availability | 99% | a 5xx response | 1% of requests (about 7.2 hours if everything failed) |
+| Latency | 95% | `GET /api/orders/{id}` slower than 300 ms | 5% of those requests |
 
-The availability SLO counts only 5xx responses as failures. Client errors (4xx) are valid responses and do not consume its availability budget. The latency SLO is calculated from `http_request_duration_seconds_bucket` for the normalized `handler="/api/orders/{order_id}"` label.
+4xx responses (client mistakes) do not count as failures.
 
-## Recording Rules
+## How Prometheus calculates it
 
-`k8s/base/monitoring/slo-rules.yaml` records 5m, 30m, 1h, 6h, and 30d error ratios. It converts each ratio into a burn rate by dividing it by the relevant budget (1% for availability, 5% for latency). Prometheus retains 35 days so the 30-day expressions have sufficient history.
+File: `k8s/base/monitoring/slo-rules.yml`. For windows of 5m, 30m, 1h, 6h and 30d it records:
 
-`slo:service_a:error_budget_remaining:30d` is the availability-budget fraction remaining. Grafana displays it as a gauge together with the current burn rates and firing SLO alerts.
+```
+error ratio  = 5xx requests / all requests
+latency bad  = 1 - (requests ≤ 0.3 s / all order reads)
+burn rate    = ratio / budget          (budget = 0.01 or 0.05)
+budget left  = 1 - (30-day error ratio / 0.01)
+```
 
-## Multi-window Burn-rate Alerts
+Two details I had to get right (both were bugs before):
+- **`or vector(0)`**: Prometheus only creates the "5xx" series after the first 5xx happens.
+  Without this, the error ratio would show *no data* instead of *0* on a healthy service.
+- **A histogram bucket at 0.3 s**: Prometheus can only answer "how many requests were faster
+  than X" when X is a bucket boundary. The library's default buckets were 0.1, 0.5 and 1 s, so a
+  300 ms SLO could never be calculated.
 
-The alerts use the Google SRE multi-window pattern: a short window detects current impact while a longer window reduces noise from a brief spike.
+When there is no traffic at all, the ratio is "0 divided by 0" and Grafana shows NaN. That just
+means "no requests", not an error.
 
-| Alert | Condition | Severity and handling |
+## The alerts
+
+| Alert | Fires when | Severity |
 |---|---|---|
-| `SLOFastBurn` | Burn rate >14.4x in both 1h and 5m windows for 5m | `critical`; routed to the existing paging Slack channel |
-| `SLOSlowBurn` | Burn rate >6x in both 6h and 30m windows for 30m | `warning`; routed to the lower-urgency SLO Slack channel |
+| `SLOFastBurn` | burn rate > 14.4 in **both** the last 1h and the last 5m, for 2 minutes | critical |
+| `SLOSlowBurn` | burn rate > 6 in **both** the last 6h and the last 30m, for 15 minutes | warning |
 
-At 14.4x, a 1% availability budget would be exhausted in roughly two days if the rate persisted. The fast alert is intended to page quickly; the slow alert prompts investigation before gradual degradation consumes the budget.
+**Why two windows?** The long window makes sure it is a real problem, not a 10-second blip. The
+short window makes sure it is still happening, so the alert clears soon after the fix.
 
-## Live Verification Procedure
+**Why 14.4?** Burning 14.4× for one hour uses 2% of the monthly budget (14.4 × 1 h ÷ 720 h).
+This threshold comes from the Google SRE Workbook.
 
-The SLO rules must be verified against the running cluster, not merely parsed. Generate sustained Service A 5xx responses for more than the alert's combined evaluation window, then capture:
+## How I know the rules work
 
-1. The Prometheus `ALERTS{alertname="SLOFastBurn"}` result.
-2. The Alertmanager API/UI showing the alert as firing.
-3. The corresponding critical Slack notification.
-
-These live artifacts are deliberately pending until the planned verification session.
+- **Rule unit tests** (`k8s/base/monitoring/rules-test.yml`, run with `promtool test rules`). They
+  feed fake traffic in and check that:
+  - 50% errors fires `HighErrorRate` after 1 minute, not before;
+  - at very low traffic (0.1 requests/s) the error ratio is still correct;
+  - with no errors ever, the ratio is 0 and the full budget remains;
+  - 100% errors fires `SLOFastBurn` but not yet `SLOSlowBurn`.
+- **Live:** during the `db-exhaust` drill on minikube, `SLOFastBurn` really fired and reached
+  Alertmanager. The Slack message was not tested (no webhook configured).
