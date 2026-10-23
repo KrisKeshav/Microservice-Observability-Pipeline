@@ -20,7 +20,7 @@ jobs:
     name: Lint, test & validate config
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -91,7 +91,7 @@ jobs:
       # Immutable tag = commit SHA, so every deployed image traces back to exact source.
       IMAGE: ghcr.io/kriskeshav/microservice-observability-pipeline/${{ matrix.service }}:${{ github.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: docker/setup-buildx-action@v3
 
@@ -136,7 +136,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # CI never touches the cluster. It records the new tag in Git and Argo CD syncs it.
       - name: Point the dev overlay at this commit's images
