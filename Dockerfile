@@ -1,5 +1,5 @@
 # One image recipe for every service; CI picks the service with --build-arg SERVICE=...
-FROM python:3.12-slim
+FROM python:3.15-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
